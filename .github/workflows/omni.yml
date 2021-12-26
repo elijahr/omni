@@ -38,7 +38,10 @@ jobs:
               with:
                   tool_versions: |
                       nim latest
-            - run: asdf global nim latest; nimble install -Y
+            - run: |
+                . "${HOME}/.asdf/asdf.sh"
+                asdf local nim latest
+                nimble install -Y
             - run: nimble test -Y
 
     #Windows does not work well
