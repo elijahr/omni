@@ -353,3 +353,185 @@ sample:
     check maxOutVal >= 0x599000'u32 and maxOutVal <= 0x600000'u32
     # clamp(0.9, 0.3, 0.6) should be clamped to hi = 0.6 ($4CCCCD)
     check clampOutVal >= 0x4CC000'u32 and clampOutVal <= 0x4CD000'u32
+
+  test "Real 24-bit variable division executes bit-accurately on DspState":
+    let dslDiv = """
+params:
+    num {0.25, -1.0, 1.0}
+    den {0.50, -1.0, 1.0}
+outs:
+    quotOut
+sample:
+    quotOut = num / den
+"""
+    let mDiv = parseOmniText(dslDiv, "DivisionModule")
+    let asmDiv = emitDsp56300Asm(mDiv)
+    check "ASL" in asmDiv
+    check "SUB" in asmDiv
+    let resDiv = assembleText(asmDiv)
+    check resDiv.pRam.len > 0
+
+    # 1. 0.25 / 0.50 == 0.50 ($400000)
+    var st = newDspState()
+    st.pc = 0x100'u32
+    for e in resDiv.pRam: st.pRam[e.address] = e.word
+    for e in resDiv.xRam: st.xRam[e.address] = e.word
+    for e in resDiv.yRam: st.yRam[e.address] = e.word
+
+    st.xRam[resDiv.symbols["num"]] = 0x200000'u32 # 0.25
+    st.xRam[resDiv.symbols["den"]] = 0x400000'u32 # 0.50
+
+    for step in 0..<200:
+      if st.pc >= 0x100'u32 and st.pRam[st.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(st, st.pc, maxWords = 8)
+      discard runBlock(st, blk)
+
+    let quotVal = st.xRam[resDiv.symbols["quotOut"]]
+    check quotVal == 0x400000'u32 # 0.50
+
+    # 2. -0.25 / 0.50 == -0.50 ($C00000)
+    var stNeg = newDspState()
+    stNeg.pc = 0x100'u32
+    for e in resDiv.pRam: stNeg.pRam[e.address] = e.word
+    for e in resDiv.xRam: stNeg.xRam[e.address] = e.word
+    for e in resDiv.yRam: stNeg.yRam[e.address] = e.word
+
+    stNeg.xRam[resDiv.symbols["num"]] = 0xE00000'u32 # -0.25
+    stNeg.xRam[resDiv.symbols["den"]] = 0x400000'u32 # 0.50
+
+    for step in 0..<200:
+      if stNeg.pc >= 0x100'u32 and stNeg.pRam[stNeg.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(stNeg, stNeg.pc, maxWords = 8)
+      discard runBlock(stNeg, blk)
+
+    let quotNegVal = stNeg.xRam[resDiv.symbols["quotOut"]]
+    check quotNegVal == 0xC00000'u32 # -0.50
+
+    # 3. Division by zero saturates to $7FFFFF
+    var stZero = newDspState()
+    stZero.pc = 0x100'u32
+    for e in resDiv.pRam: stZero.pRam[e.address] = e.word
+    for e in resDiv.xRam: stZero.xRam[e.address] = e.word
+    for e in resDiv.yRam: stZero.yRam[e.address] = e.word
+
+    stZero.xRam[resDiv.symbols["num"]] = 0x200000'u32
+    stZero.xRam[resDiv.symbols["den"]] = 0x000000'u32
+
+    for step in 0..<200:
+      if stZero.pc >= 0x100'u32 and stZero.pRam[stZero.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(stZero, stZero.pc, maxWords = 8)
+      discard runBlock(stZero, blk)
+
+    let quotZeroVal = stZero.xRam[resDiv.symbols["quotOut"]]
+    check quotZeroVal == 0x7FFFFF'u32
+
+  test "Authentic polynomials for pow(2.0, x) and tan(x) execute accurately on DspState":
+    let dslPoly = """
+params:
+    pitchOffset {-0.5, -1.0, 1.0}
+    angle {0.1, -1.0, 1.0}
+outs:
+    expOut
+    tanOut
+sample:
+    expOut = pow(2.0, pitchOffset)
+    tanOut = tan(angle)
+"""
+    let mPoly = parseOmniText(dslPoly, "PolyModule")
+    let asmPoly = emitDsp56300Asm(mPoly)
+    check "$071AC0" in asmPoly # c3 for pow
+    check "$111111" in asmPoly # 2/15 for tan
+    let resPoly = assembleText(asmPoly)
+    check resPoly.pRam.len > 0
+
+    var stP = newDspState()
+    stP.pc = 0x100'u32
+    for e in resPoly.pRam: stP.pRam[e.address] = e.word
+    for e in resPoly.xRam: stP.xRam[e.address] = e.word
+    for e in resPoly.yRam: stP.yRam[e.address] = e.word
+
+    for step in 0..<100:
+      if stP.pc >= 0x100'u32 and stP.pRam[stP.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(stP, stP.pc, maxWords = 8)
+      discard runBlock(stP, blk)
+
+    let expVal = stP.xRam[resPoly.symbols["expOut"]]
+    let tanVal = stP.xRam[resPoly.symbols["tanOut"]]
+
+    # 2^(-0.5) is approx 0.7071 ($5A6F9B)
+    check expVal >= 0x5A0000'u32 and expVal <= 0x5B0000'u32
+    # tan(0.1) is approx 0.10033 ($0CD7C4)
+    check tanVal >= 0x0CD000'u32 and tanVal <= 0x0CE000'u32
+
+  test "Power-of-two scaling and Q23 fractional wrapping":
+    let dslScale = """
+params:
+    valX {0.15, 0.0, 1.0}
+outs:
+    scale2
+    scale4
+    scaleHalf
+    div4
+    wrappedMod
+    fracPart
+sample:
+    scale2 = 2.0 * valX
+    scale4 = 4.0 * valX
+    scaleHalf = valX * 0.5
+    div4 = valX / 4.0
+    wrappedMod = (valX + 0.9) % 1.0
+    fracPart = valX - trunc(valX)
+"""
+    let mScale = parseOmniText(dslScale, "ScaleModule")
+    let asmScale = emitDsp56300Asm(mScale)
+    check "ASL" in asmScale
+    check "ASR" in asmScale
+    check "$7FFFFF" in asmScale
+
+    let resScale = assembleText(asmScale)
+    check resScale.pRam.len > 0
+
+    var stS = newDspState()
+    stS.pc = 0x100'u32
+    for e in resScale.pRam: stS.pRam[e.address] = e.word
+    for e in resScale.xRam: stS.xRam[e.address] = e.word
+    for e in resScale.yRam: stS.yRam[e.address] = e.word
+
+    for step in 0..<100:
+      if stS.pc >= 0x100'u32 and stS.pRam[stS.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(stS, stS.pc, maxWords = 8)
+      discard runBlock(stS, blk)
+
+    let s2 = stS.xRam[resScale.symbols["scale2"]]
+    let sHalf = stS.xRam[resScale.symbols["scaleHalf"]]
+    # valX = 0.15 ($133333). 2.0 * 0.15 = 0.30 ($266666)
+    check s2 >= 0x266000'u32 and s2 <= 0x267000'u32
+    # 0.15 * 0.5 = 0.075 ($099999)
+    check sHalf >= 0x099000'u32 and sHalf <= 0x09A000'u32
+
+  test "compileOmniSnippet generates relocated kernel snippet without collision":
+    let dslMod = """
+params:
+    gainParam {0.75, 0.0, 1.0}
+outs:
+    out1
+    out2
+sample:
+    out1 = in1 * gainParam
+    out2 = in2 * 0.5
+"""
+    let m = parseOmniText(dslMod, "RelocModule")
+    var addrs = defaultDsp56300Addresses()
+    addrs.inletAddrs = @[0x0110'u32, 0x0111'u32]
+    addrs.outletAddrs = @[0x0120'u32, 0x0121'u32]
+    addrs.paramBase = 0x0090'u32
+    addrs.stateBase = 0x0030'u32
+
+    let snippet = compileOmniSnippet(m, addrs, labelPrefix = "mod_42")
+    check "X:$0110" in snippet # in1
+    check "X:$0111" in snippet # in2
+    check "X:$0120" in snippet # out1
+    check "X:$0121" in snippet # out2
+    check "X:$0090" in snippet # gainParam
+    check "RTS" notin snippet
+    check "ORG" notin snippet

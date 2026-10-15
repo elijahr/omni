@@ -88,7 +88,7 @@ type
     tkAssign, tkPlusAssign, tkMinusAssign, tkStarAssign, tkSlashAssign,
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe,
     tkLParen, tkRParen, tkLBrace, tkRBrace, tkLBracket, tkRBracket,
-    tkColon, tkComma,
+    tkColon, tkComma, tkDot,
     # Keywords
     kwIf, kwElif, kwElse, kwWhile, kwFor, kwIn,
     kwAnd, kwOr, kwNot, kwTrue, kwFalse,
@@ -247,6 +247,7 @@ proc tokenizeLine(rawLine: string, lineNum: int): IndentedLine =
     of ']': result.tokens.add(Token(kind: tkRBracket, strVal: "]", line: lineNum, col: col))
     of ':': result.tokens.add(Token(kind: tkColon, strVal: ":", line: lineNum, col: col))
     of ',': result.tokens.add(Token(kind: tkComma, strVal: ",", line: lineNum, col: col))
+    of '.': result.tokens.add(Token(kind: tkDot, strVal: ".", line: lineNum, col: col))
     else:
       discard # Skip unknown characters
     i += 1
@@ -328,8 +329,13 @@ proc parsePrimary(p: var Parser): Expr =
     return Expr(kind: ekNum, numVal: tok.numVal)
 
   of tkIdent, kwTrue, kwFalse:
-    let name = tok.strVal
+    var name = tok.strVal
     p.advanceTok()
+    while p.currTok().kind == tkDot:
+      p.advanceTok() # Consume '.'
+      if p.currTok().kind == tkIdent:
+        name.add("." & p.currTok().strVal)
+        p.advanceTok()
     # Check for function call: name(...)
     if p.currTok().kind == tkLParen:
       p.advanceTok() # Consume '('
@@ -673,7 +679,7 @@ proc parseOmniFile*(path: string): OmniModule =
 
 proc floatToQ23Hex*(v: float): string =
   # Fractional [-1.0, 0.99999988] in Q23 format (1 sign bit, 23 fractional bits).
-  # Audio frequencies (> 1.0) normalized to standard sample rate (48000 Hz).
+  # Audio frequencies and integer constants scaled without arbitrary sample rate divisions.
   var q: int32 = 0
   if v >= -1.0 and v <= 1.0:
     if v >= 0.99999988:
@@ -681,31 +687,56 @@ proc floatToQ23Hex*(v: float): string =
     elif v <= -1.0:
       q = -8388608 # 0x800000
     else:
-      q = int32(v * 8388608.0)
-  elif v > 1.0 and v <= 24000.0:
-    q = int32((v / 48000.0) * 8388608.0)
+      q = int32(round(v * 8388608.0))
   else:
+    # Integer constant (e.g. 2.0, 3.0, 4.0, 12.0, 69.0)
     q = int32(v)
   let u = uint32(q and 0x00FFFFFF)
   return "$" & u.toHex(6)
 
 type
+  Dsp56300ModuleAddresses* = object
+    inletAddrs*: seq[uint32]   # Explicit addresses for in1..in8
+    outletAddrs*: seq[uint32]  # Explicit addresses for out1..out8
+    paramBase*: uint32         # Base address in X: for parameters (p0, p1, ...)
+    stateBase*: uint32         # Base address in Y: for state variables (s0, s1, ...)
+    delayBase*: uint32         # Base address in Y: for circular delay buffers
+    pOrg*: uint32              # Code origin in P: memory (default 0x0100)
+    customAddrs*: bool         # True if caller specified custom relocated addresses
+
+proc defaultDsp56300Addresses*(): Dsp56300ModuleAddresses =
+  result.inletAddrs = @[]
+  result.outletAddrs = @[]
+  result.paramBase = 0x0020'u32
+  result.stateBase = 0x0000'u32
+  result.delayBase = 0x0400'u32
+  result.pOrg = 0x0100'u32
+  result.customAddrs = false
+
+type
   AsmContext = object
     module: OmniModule
+    addrs: Dsp56300ModuleAddresses
     paramNames: Table[string, bool]
     stateNames: Table[string, bool]
     inNames: Table[string, bool]
     outNames: Table[string, bool]
+    inletAddrMap: Table[string, uint32]
+    outletAddrMap: Table[string, uint32]
+    paramAddrMap: Table[string, uint32]
+    stateAddrMap: Table[string, uint32]
     tempTable: Table[string, uint32]
     tempNames: seq[string]
     curTempAddr: uint32
     spillCounter: int
     labelCounter: int
+    labelPrefix: string
     asmOut: string
 
 proc nextLabel(ctx: var AsmContext, prefix: string): string =
   ctx.labelCounter += 1
-  return prefix & "_" & $ctx.labelCounter
+  let pfx = if ctx.labelPrefix.len > 0: ctx.labelPrefix & "_" & prefix else: prefix
+  return pfx & "_" & $ctx.labelCounter
 
 proc allocSpill(ctx: var AsmContext): string =
   ctx.spillCounter += 1
@@ -736,7 +767,15 @@ proc collectAssignTargets(stmt: Stmt, targets: var seq[string]) =
     discard
 
 proc getMemOperand(ctx: AsmContext, sym: string): string =
-  if sym in ctx.inNames or sym in ctx.outNames or sym in ctx.paramNames:
+  if sym in ctx.inletAddrMap:
+    return "X:$" & toHex(int64(ctx.inletAddrMap[sym]), 4)
+  elif sym in ctx.outletAddrMap:
+    return "X:$" & toHex(int64(ctx.outletAddrMap[sym]), 4)
+  elif sym in ctx.paramAddrMap:
+    return "X:$" & toHex(int64(ctx.paramAddrMap[sym]), 4)
+  elif sym in ctx.stateAddrMap:
+    return "Y:$" & toHex(int64(ctx.stateAddrMap[sym]), 4)
+  elif sym in ctx.inNames or sym in ctx.outNames or sym in ctx.paramNames:
     return "X:" & sym
   elif sym in ctx.stateNames or sym in ctx.tempTable:
     return "Y:" & sym
@@ -747,6 +786,7 @@ proc getMemOperand(ctx: AsmContext, sym: string): string =
 proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A")
 proc loadToX0(ctx: var AsmContext, expr: Expr)
 proc loadToY0(ctx: var AsmContext, expr: Expr)
+proc genDivide(ctx: var AsmContext, lhs: Expr, rhs: Expr, acc: string = "A")
 proc genCondJump(ctx: var AsmContext, cond: Expr, targetLabel: string, jumpIfTrue: bool)
 proc genStmt(ctx: var AsmContext, stmt: Stmt)
 
@@ -790,6 +830,92 @@ proc loadToY0(ctx: var AsmContext, expr: Expr) =
   else:
     ctx.genExprToAcc(expr, "A")
     ctx.asmOut.add("                MOVE    A, Y0\n")
+
+proc genDivide(ctx: var AsmContext, lhs: Expr, rhs: Expr, acc: string = "A") =
+  # True 24-bit restoring shift-subtract fixed-point division: A = lhs / rhs
+  # Evaluates lhs into A, rhs into X0.
+  # Handles division by zero, signed values, and saturation.
+  ctx.genExprToAcc(lhs, "A")
+
+  if isLeaf(rhs):
+    ctx.loadToX0(rhs)
+  else:
+    let spill = ctx.allocSpill()
+    ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+    ctx.genExprToAcc(rhs, "A")
+    ctx.asmOut.add("                MOVE    A, X0\n")
+    ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+    ctx.freeSpill()
+
+  let lDivZero = ctx.nextLabel("_L_div_zero")
+  let lSat = ctx.nextLabel("_L_div_sat")
+  let lDoDiv = ctx.nextLabel("_L_div_do")
+  let lApplySign = ctx.nextLabel("_L_div_apply_sign")
+  let lDone = ctx.nextLabel("_L_div_done")
+  let lAPos = ctx.nextLabel("_L_div_a_pos")
+  let lX0Pos = ctx.nextLabel("_L_div_x0_pos")
+
+  # 1. Check division by zero: if X0 == 0 -> jump to div_zero
+  ctx.asmOut.add("                CLR     B\n")
+  ctx.asmOut.add("                CMP     X0, B\n")
+  ctx.asmOut.add("                JEQ     " & lDivZero & "\n")
+
+  # 2. Track output sign in Y1: Y1 = (A < 0) ^ (X0 < 0)
+  ctx.asmOut.add("                MOVE    #$000000, Y1         ; sign flag = 0 (positive)\n")
+  ctx.asmOut.add("                TST     A\n")
+  ctx.asmOut.add("                JGE     " & lAPos & "\n")
+  ctx.asmOut.add("                NEG     A\n")
+  ctx.asmOut.add("                MOVE    #$000001, Y1         ; sign flag = 1\n")
+  ctx.asmOut.add(lAPos & ":\n")
+
+  ctx.asmOut.add("                MOVE    X0, B\n")
+  ctx.asmOut.add("                TST     B\n")
+  ctx.asmOut.add("                JGE     " & lX0Pos & "\n")
+  ctx.asmOut.add("                NEG     B\n")
+  ctx.asmOut.add("                MOVE    B, X0                ; X0 = |rhs|\n")
+  ctx.asmOut.add("                MOVE    Y1, B\n")
+  ctx.asmOut.add("                MOVE    #$000001, X1\n")
+  ctx.asmOut.add("                EOR     X1, B\n")
+  ctx.asmOut.add("                MOVE    B, Y1                ; toggle sign\n")
+  ctx.asmOut.add(lX0Pos & ":\n")
+
+  # 3. Check saturation: if |A| >= X0 -> saturate to $7FFFFF
+  ctx.asmOut.add("                CMP     X0, A\n")
+  ctx.asmOut.add("                JLT     " & lDoDiv & "\n")
+  ctx.asmOut.add(lSat & ":\n")
+  ctx.asmOut.add("                MOVE    #$7FFFFF, B\n")
+  ctx.asmOut.add("                JMP     " & lApplySign & "\n")
+
+  ctx.asmOut.add(lDivZero & ":\n")
+  ctx.asmOut.add("                MOVE    #$7FFFFF, B\n")
+  ctx.asmOut.add("                JMP     " & lApplySign & "\n")
+
+  # 4. 23-bit restoring shift-subtract division loop
+  ctx.asmOut.add(lDoDiv & ":\n")
+  ctx.asmOut.add("                CLR     B                    ; quotient = 0\n")
+  for k in 1..23:
+    let bitVal = 1'u32 shl (23 - k)
+    let bitHex = "$" & bitVal.toHex(6)
+    let lSkip = ctx.nextLabel("_L_div_k")
+    ctx.asmOut.add("                ASL     A\n")
+    ctx.asmOut.add("                CMP     X0, A\n")
+    ctx.asmOut.add("                JLT     " & lSkip & "\n")
+    ctx.asmOut.add("                SUB     X0, A\n")
+    ctx.asmOut.add("                MOVE    #" & bitHex & ", X1\n")
+    ctx.asmOut.add("                ADD     X1, B\n")
+    ctx.asmOut.add(lSkip & ":\n")
+
+  # 5. Apply sign and transfer result to acc
+  ctx.asmOut.add(lApplySign & ":\n")
+  ctx.asmOut.add("                MOVE    Y1, A\n")
+  ctx.asmOut.add("                TST     A\n")
+  ctx.asmOut.add("                JEQ     " & lDone & "\n")
+  ctx.asmOut.add("                NEG     B\n")
+  ctx.asmOut.add(lDone & ":\n")
+  if acc == "A":
+    ctx.asmOut.add("                MOVE    B, A\n")
+  elif acc != "B":
+    ctx.asmOut.add("                MOVE    B, " & acc & "\n")
 
 proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
   if expr == nil:
@@ -864,9 +990,51 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.loadToY0(expr.rhs.rhs)
         ctx.asmOut.add("                MAC     -X0, Y0, " & acc & "\n")
         return
+      elif expr.rhs.kind == ekCall and (expr.rhs.callee == "trunc" or expr.rhs.callee == "int") and
+          expr.lhs.kind == ekSym and expr.rhs.args.len >= 1 and expr.rhs.args[0].kind == ekSym and
+          expr.rhs.args[0].symName == expr.lhs.symName:
+        ctx.genExprToAcc(expr.lhs, acc)
+        ctx.asmOut.add("                MOVE    #$7FFFFF, X0\n")
+        ctx.asmOut.add("                AND     X0, " & acc & "                ; x - trunc(x) -> frac(x)\n")
+        return
 
-    # Multiplication: X0 * Y0 -> A
+    # Multiplication: X0 * Y0 -> A (with power-of-two optimizations)
     if op == "*":
+      if expr.rhs.kind == ekNum:
+        if expr.rhs.numVal == 2.0:
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                ASL     " & acc & "\n")
+          return
+        elif expr.rhs.numVal == 4.0:
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                ASL     " & acc & "\n                ASL     " & acc & "\n")
+          return
+        elif expr.rhs.numVal == 0.5:
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                ASR     " & acc & "\n")
+          return
+        elif expr.rhs.numVal == 0.25:
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                ASR     " & acc & "\n                ASR     " & acc & "\n")
+          return
+      elif expr.lhs.kind == ekNum:
+        if expr.lhs.numVal == 2.0:
+          ctx.genExprToAcc(expr.rhs, acc)
+          ctx.asmOut.add("                ASL     " & acc & "\n")
+          return
+        elif expr.lhs.numVal == 4.0:
+          ctx.genExprToAcc(expr.rhs, acc)
+          ctx.asmOut.add("                ASL     " & acc & "\n                ASL     " & acc & "\n")
+          return
+        elif expr.lhs.numVal == 0.5:
+          ctx.genExprToAcc(expr.rhs, acc)
+          ctx.asmOut.add("                ASR     " & acc & "\n")
+          return
+        elif expr.lhs.numVal == 0.25:
+          ctx.genExprToAcc(expr.rhs, acc)
+          ctx.asmOut.add("                ASR     " & acc & "\n                ASR     " & acc & "\n")
+          return
+
       ctx.genExprToAcc(expr.lhs, acc)
       ctx.asmOut.add("                MOVE    " & acc & ", X0\n")
       if expr.rhs.kind == ekSym:
@@ -892,25 +1060,34 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.asmOut.add("                MOVE    #$000055, Y0         ; 1/samplerate in Q23\n")
         ctx.asmOut.add("                MPY     X0, Y0, " & acc & "\n")
         return
-      elif expr.rhs.kind == ekNum and expr.rhs.numVal != 0.0:
-        ctx.genExprToAcc(expr.lhs, acc)
-        ctx.asmOut.add("                MOVE    " & acc & ", X0\n")
-        let recip = 1.0 / expr.rhs.numVal
-        ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(recip) & ", Y0\n")
-        ctx.asmOut.add("                MPY     X0, Y0, " & acc & "\n")
-        return
-      else:
-        # General divide via reciprocal approximation
-        ctx.genExprToAcc(expr.lhs, acc)
-        ctx.asmOut.add("                MOVE    " & acc & ", X0\n")
-        let spill = ctx.allocSpill()
-        ctx.asmOut.add("                MOVE    X0, Y:" & spill & "\n")
-        ctx.genExprToAcc(expr.rhs, acc)
-        ctx.asmOut.add("                MOVE    " & acc & ", Y0\n")
-        ctx.asmOut.add("                MOVE    Y:" & spill & ", X0\n")
-        ctx.freeSpill()
-        ctx.asmOut.add("                MPY     X0, Y0, " & acc & "\n")
-        return
+      elif expr.rhs.kind == ekNum:
+        if expr.rhs.numVal == 2.0:
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                ASR     " & acc & "\n")
+          return
+        elif expr.rhs.numVal == 4.0:
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                ASR     " & acc & "\n                ASR     " & acc & "\n")
+          return
+        elif expr.rhs.numVal == 0.5:
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                ASL     " & acc & "\n")
+          return
+        elif expr.rhs.numVal == 0.25:
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                ASL     " & acc & "\n                ASL     " & acc & "\n")
+          return
+        elif expr.rhs.numVal != 0.0 and abs(expr.rhs.numVal) >= 1.0:
+          # Reciprocal multiplication for constants with |val| >= 1.0 (reciprocal <= 1.0)
+          let recip = 1.0 / expr.rhs.numVal
+          ctx.genExprToAcc(expr.lhs, acc)
+          ctx.asmOut.add("                MOVE    " & acc & ", X0\n")
+          ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(recip) & ", Y0\n")
+          ctx.asmOut.add("                MPY     X0, Y0, " & acc & "\n")
+          return
+      # True 24-bit restoring shift-subtract variable division
+      ctx.genDivide(expr.lhs, expr.rhs, acc)
+      return
 
     # Addition / Subtraction
     if op == "+" or op == "-":
@@ -976,9 +1153,25 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.asmOut.add("                MPY     X0, Y1, " & acc & "\n")
 
     of "tan":
-      # Filter cutoff: tan(w) ~ w for digital filters
+      # Filter cutoff authentic polynomial: x * (1 + x^2 * (1/3 + 2/15 * x^2))
+      # Evaluated without accumulator overflow as x + x * [x^2 * (1/3 + 2/15 * x^2)]
       if expr.args.len >= 1:
-        ctx.genExprToAcc(expr.args[0], acc)
+        ctx.genExprToAcc(expr.args[0], "A")
+        ctx.asmOut.add("                MOVE    A, X0\n")
+        ctx.asmOut.add("                MPY     X0, X0, A            ; A = x^2\n")
+        ctx.asmOut.add("                MOVE    A, Y0                ; Y0 = x^2\n")
+        ctx.asmOut.add("                MOVE    #$111111, Y1         ; 2/15 in Q23\n")
+        ctx.asmOut.add("                MPY     Y0, Y1, B            ; B = (2/15) * x^2\n")
+        ctx.asmOut.add("                MOVE    #$2AAAAA, Y1         ; 1/3 in Q23\n")
+        ctx.asmOut.add("                ADD     Y1, B                ; B = 1/3 + 2/15 * x^2\n")
+        ctx.asmOut.add("                MOVE    B, Y1\n")
+        ctx.asmOut.add("                MPY     Y0, Y1, B            ; B = x^2 * (1/3 + 2/15 * x^2)\n")
+        ctx.asmOut.add("                MOVE    B, Y1\n")
+        ctx.asmOut.add("                MPY     X0, Y1, B            ; B = x * (x^2 * (1/3 + 2/15 * x^2))\n")
+        ctx.asmOut.add("                MOVE    X0, A\n")
+        ctx.asmOut.add("                ADD     B, A                 ; A = x + B\n")
+        if acc != "A":
+          ctx.asmOut.add("                MOVE    A, " & acc & "\n")
 
     of "tanh":
       # Real DSP56300 polynomial soft saturation: x * (1 - 1/3 * x^2)
@@ -1075,14 +1268,56 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.genExprToAcc(expr.args[0], acc)
         ctx.asmOut.add("                ABS     " & acc & "\n")
 
-    of "trunc", "int", "float":
+    of "trunc", "int":
+      if expr.args.len >= 1:
+        ctx.genExprToAcc(expr.args[0], acc)
+        ctx.asmOut.add("                MOVE    #$7FFFFF, X0\n")
+        ctx.asmOut.add("                AND     X0, " & acc & "                ; Q23 fractional wrapping\n")
+
+    of "float":
       if expr.args.len >= 1:
         ctx.genExprToAcc(expr.args[0], acc)
 
     of "pow":
       if expr.args.len >= 2:
-        # Evaluate exponent
-        ctx.genExprToAcc(expr.args[1], acc)
+        # Check if 2.0 ^ x (pitch-to-frequency scaling polynomial)
+        let isBaseTwo = (expr.args[0].kind == ekNum and expr.args[0].numVal == 2.0)
+        if isBaseTwo:
+          ctx.genExprToAcc(expr.args[1], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    #$071AC0, Y0         ; c3 = 0.055504 in Q23\n")
+          ctx.asmOut.add("                MPY     X0, Y0, B            ; x * c3\n")
+          ctx.asmOut.add("                MOVE    #$1EBFCD, Y1         ; c2 = 0.240226 in Q23\n")
+          ctx.asmOut.add("                ADD     Y1, B                ; c2 + x * c3\n")
+          ctx.asmOut.add("                MOVE    B, Y0\n")
+          ctx.asmOut.add("                MPY     X0, Y0, B            ; x * (c2 + x * c3)\n")
+          ctx.asmOut.add("                MOVE    #$58B9FE, Y1         ; c1 = 0.693147 in Q23\n")
+          ctx.asmOut.add("                ADD     Y1, B                ; c1 + x * (...)\n")
+          ctx.asmOut.add("                MOVE    B, Y0\n")
+          ctx.asmOut.add("                MPY     X0, Y0, B            ; x * (c1 + ...)\n")
+          ctx.asmOut.add("                MOVE    #$7FFFFF, A          ; 1.0\n")
+          ctx.asmOut.add("                ADD     B, A                 ; 1.0 + x * (...)\n")
+          if acc != "A":
+            ctx.asmOut.add("                MOVE    A, " & acc & "\n")
+        else:
+          ctx.genExprToAcc(expr.args[1], acc)
+
+    of "delay_read", "delay.read":
+      # Circular delay buffer in Y: memory at ctx.addrs.delayBase
+      if expr.args.len >= 1:
+        if expr.args[0].kind == ekNum:
+          let offset = uint32(expr.args[0].numVal)
+          let targetAddr = ctx.addrs.delayBase + offset
+          ctx.asmOut.add("                MOVE    Y:$" & toHex(int64(targetAddr), 4) & ", " & acc & "       ; delay_read(" & $offset & ")\n")
+        else:
+          ctx.genExprToAcc(expr.args[0], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    #$" & toHex(int64(ctx.addrs.delayBase), 4) & ", A\n")
+          ctx.asmOut.add("                ADD     X0, A\n")
+          ctx.asmOut.add("                MOVE    A, R0\n")
+          ctx.asmOut.add("                MOVE    Y:(R0), " & acc & "       ; delay_read(dynamic)\n")
+      else:
+        ctx.asmOut.add("                MOVE    Y:$" & toHex(int64(ctx.addrs.delayBase), 4) & ", " & acc & "\n")
 
     else:
       if expr.args.len >= 1:
@@ -1220,14 +1455,79 @@ proc genStmt(ctx: var AsmContext, stmt: Stmt) =
     ctx.asmOut.add(lEnd & ":\n")
 
   of skExpr:
-    ctx.genExprToAcc(stmt.callExpr, "A")
+    if stmt.callExpr != nil and stmt.callExpr.kind == ekCall and
+        (stmt.callExpr.callee == "delay_write" or stmt.callExpr.callee == "delay.write"):
+      if stmt.callExpr.args.len >= 1:
+        ctx.genExprToAcc(stmt.callExpr.args[0], "A")
+        if stmt.callExpr.args.len >= 2 and stmt.callExpr.args[1].kind == ekNum:
+          let offset = uint32(stmt.callExpr.args[1].numVal)
+          let targetAddr = ctx.addrs.delayBase + offset
+          ctx.asmOut.add("                MOVE    A, Y:$" & toHex(int64(targetAddr), 4) & "       ; delay_write(" & $offset & ")\n")
+        else:
+          ctx.asmOut.add("                MOVE    A, Y:$" & toHex(int64(ctx.addrs.delayBase), 4) & "       ; delay_write(0)\n")
+    else:
+      ctx.genExprToAcc(stmt.callExpr, "A")
+
+proc compileOmniSnippet*(m: OmniModule, addrs: Dsp56300ModuleAddresses, labelPrefix: string): string =
+  var ctx = AsmContext(
+    module: m,
+    addrs: addrs,
+    curTempAddr: addrs.stateBase + uint32(m.stateVars.len) + 16'u32,
+    spillCounter: 0,
+    labelCounter: 0,
+    labelPrefix: labelPrefix,
+    asmOut: ""
+  )
+
+  for p in m.params: ctx.paramNames[p.name] = true
+  for sv in m.stateVars: ctx.stateNames[sv.name] = true
+  for i in m.inputs: ctx.inNames[i] = true
+  for o in m.outputs: ctx.outNames[o] = true
+
+  # Map custom inlet addresses
+  for i, inName in m.inputs:
+    if i < addrs.inletAddrs.len:
+      ctx.inletAddrMap[inName] = addrs.inletAddrs[i]
+
+  # Map custom outlet addresses (out1..out8)
+  for i, outName in m.outputs:
+    if i < addrs.outletAddrs.len:
+      ctx.outletAddrMap[outName] = addrs.outletAddrs[i]
+
+  # Map parameter addresses: paramBase + i in X memory
+  for i, p in m.params:
+    ctx.paramAddrMap[p.name] = addrs.paramBase + uint32(i)
+
+  # Map state variable addresses: stateBase + i in Y memory
+  for i, sv in m.stateVars:
+    ctx.stateAddrMap[sv.name] = addrs.stateBase + uint32(i)
+
+  # Discover temporary assign targets
+  var allTargets: seq[string] = @[]
+  for s in m.performStmts: collectAssignTargets(s, allTargets)
+  for s in m.sampleStmts: collectAssignTargets(s, allTargets)
+
+  for target in allTargets:
+    if target notin ctx.outNames and target notin ctx.stateNames and target notin ctx.tempTable:
+      ctx.tempTable[target] = ctx.curTempAddr
+      ctx.tempNames.add(target)
+      ctx.curTempAddr += 1
+
+  for s in m.performStmts:
+    ctx.genStmt(s)
+  for s in m.sampleStmts:
+    ctx.genStmt(s)
+
+  return ctx.asmOut
 
 proc emitDsp56300Asm*(m: OmniModule): string =
   var ctx = AsmContext(
     module: m,
+    addrs: defaultDsp56300Addresses(),
     curTempAddr: 0x0040'u32,
     spillCounter: 0,
     labelCounter: 0,
+    labelPrefix: "",
     asmOut: ""
   )
 
