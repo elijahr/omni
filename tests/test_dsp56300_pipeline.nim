@@ -246,3 +246,110 @@ sample:
         check m.name & "_alloc" in cCode
 
     check count == 18
+
+  test "Adversarial verification: min, max, clamp, tanh, and y + (a - b) * c execute accurately on DspState":
+    # 1. Test y + (a - b) * c (compound subexpression under MAC, ensuring accumulator A is not clobbered)
+    let dslCompound = """
+params:
+    yVal {0.1, 0.0, 1.0}
+    a {0.5, 0.0, 1.0}
+    b {0.2, 0.0, 1.0}
+    c {0.5, 0.0, 1.0}
+sample:
+    # Expected: 0.1 + (0.5 - 0.2) * 0.5 = 0.1 + 0.15 = 0.25 ($200000 in Q23)
+    out1 = yVal + (a - b) * c
+"""
+    let mCompound = parseOmniText(dslCompound, "CompoundMacModule")
+    let asmCompound = emitDsp56300Asm(mCompound)
+    let resCompound = assembleText(asmCompound)
+    check resCompound.pRam.len > 0
+
+    var stC = newDspState()
+    stC.pc = 0x100'u32
+    for e in resCompound.pRam: stC.pRam[e.address] = e.word
+    for e in resCompound.xRam: stC.xRam[e.address] = e.word
+    for e in resCompound.yRam: stC.yRam[e.address] = e.word
+
+    for step in 0..<50:
+      if stC.pc >= 0x100'u32 and stC.pRam[stC.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(stC, stC.pc, maxWords = 8)
+      discard runBlock(stC, blk)
+
+    let out1Addr = resCompound.symbols["out1"]
+    let actualOut = stC.xRam[out1Addr]
+    # $200000 = 0.25 in Q23 (allow small rounding tolerance +/- 2 LSBs)
+    check actualOut >= 0x1FFFFE'u32 and actualOut <= 0x200002'u32
+
+    # 2. Test tanh(x) soft saturation polynomial: x * (1 - 1/3 * x^2)
+    let dslTanh = """
+params:
+    inVal {0.5, -1.0, 1.0}
+sample:
+    out1 = tanh(inVal)
+"""
+    let mTanh = parseOmniText(dslTanh, "TanhModule")
+    let asmTanh = emitDsp56300Asm(mTanh)
+    check "MPY" in asmTanh
+    check "$2AAAAA" in asmTanh # 1/3 in Q23
+    let resTanh = assembleText(asmTanh)
+    check resTanh.pRam.len > 0
+
+    var stT = newDspState()
+    stT.pc = 0x100'u32
+    for e in resTanh.pRam: stT.pRam[e.address] = e.word
+    for e in resTanh.xRam: stT.xRam[e.address] = e.word
+    for e in resTanh.yRam: stT.yRam[e.address] = e.word
+
+    for step in 0..<50:
+      if stT.pc >= 0x100'u32 and stT.pRam[stT.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(stT, stT.pc, maxWords = 8)
+      discard runBlock(stT, blk)
+
+    let tanhOut = stT.xRam[resTanh.symbols["out1"]]
+    # inVal = 0.5 ($400000). Polynomial = 0.5 * (1 - 1/3 * 0.25) = 0.458333... (~$3AAAB5 in Q23)
+    check tanhOut >= 0x3AA000'u32 and tanhOut <= 0x3AB000'u32
+
+    # 3. Test min, max, clamp
+    let dslMath = """
+params:
+    valA {0.2, 0.0, 1.0}
+    valB {0.7, 0.0, 1.0}
+    valX {0.9, 0.0, 1.0}
+    lo {0.3, 0.0, 1.0}
+    hi {0.6, 0.0, 1.0}
+outs:
+    minOut
+    maxOut
+    clampOut
+sample:
+    minOut = min(valA, valB)
+    maxOut = max(valA, valB)
+    clampOut = clamp(valX, lo, hi)
+"""
+    let mMath = parseOmniText(dslMath, "MathIntrinsicsModule")
+    let asmMath = emitDsp56300Asm(mMath)
+    check "CMP" in asmMath
+    let resMath = assembleText(asmMath)
+    check resMath.pRam.len > 0
+
+    var stM = newDspState()
+    stM.pc = 0x100'u32
+    for e in resMath.pRam: stM.pRam[e.address] = e.word
+    for e in resMath.xRam: stM.xRam[e.address] = e.word
+    for e in resMath.yRam: stM.yRam[e.address] = e.word
+
+    for step in 0..<100:
+      if stM.pc >= 0x100'u32 and stM.pRam[stM.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(stM, stM.pc, maxWords = 10)
+      discard runBlock(stM, blk)
+
+    let minOutVal = stM.xRam[resMath.symbols["minOut"]]
+    let maxOutVal = stM.xRam[resMath.symbols["maxOut"]]
+    let clampOutVal = stM.xRam[resMath.symbols["clampOut"]]
+
+    # min(0.2, 0.7) should be 0.2 ($199999)
+    check minOutVal >= 0x199000'u32 and minOutVal <= 0x1A0000'u32
+    # max(0.2, 0.7) should be 0.7 ($599999)
+    check maxOutVal >= 0x599000'u32 and maxOutVal <= 0x600000'u32
+    # clamp(0.9, 0.3, 0.6) should be clamped to hi = 0.6 ($4CCCCD)
+    check clampOutVal >= 0x4CC000'u32 and clampOutVal <= 0x4CD000'u32

@@ -750,6 +750,9 @@ proc loadToY0(ctx: var AsmContext, expr: Expr)
 proc genCondJump(ctx: var AsmContext, cond: Expr, targetLabel: string, jumpIfTrue: bool)
 proc genStmt(ctx: var AsmContext, stmt: Stmt)
 
+proc isLeaf(e: Expr): bool =
+  e != nil and e.kind in {ekSym, ekNum}
+
 proc loadToX0(ctx: var AsmContext, expr: Expr) =
   if expr == nil: return
   if expr.kind == ekSym:
@@ -834,14 +837,18 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
       return
 
     # Multiply-Accumulate (MAC): a + b * c  or  b * c + a
+    # Only use unspilled fast-path when BOTH operands of '*' are leaf nodes (ekSym or ekNum)
+    # to prevent clobbering accumulator A during loadToX0 / loadToY0.
     if op == "+":
-      if expr.rhs.kind == ekBinary and expr.rhs.bop == "*":
+      if expr.rhs.kind == ekBinary and expr.rhs.bop == "*" and
+          isLeaf(expr.rhs.lhs) and isLeaf(expr.rhs.rhs):
         ctx.genExprToAcc(expr.lhs, acc)
         ctx.loadToX0(expr.rhs.lhs)
         ctx.loadToY0(expr.rhs.rhs)
         ctx.asmOut.add("                MAC     X0, Y0, " & acc & "\n")
         return
-      elif expr.lhs.kind == ekBinary and expr.lhs.bop == "*":
+      elif expr.lhs.kind == ekBinary and expr.lhs.bop == "*" and
+          isLeaf(expr.lhs.lhs) and isLeaf(expr.lhs.rhs):
         ctx.genExprToAcc(expr.rhs, acc)
         ctx.loadToX0(expr.lhs.lhs)
         ctx.loadToY0(expr.lhs.rhs)
@@ -850,7 +857,8 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
 
     # Multiply-Subtract: a - b * c
     if op == "-":
-      if expr.rhs.kind == ekBinary and expr.rhs.bop == "*":
+      if expr.rhs.kind == ekBinary and expr.rhs.bop == "*" and
+          isLeaf(expr.rhs.lhs) and isLeaf(expr.rhs.rhs):
         ctx.genExprToAcc(expr.lhs, acc)
         ctx.loadToX0(expr.rhs.lhs)
         ctx.loadToY0(expr.rhs.rhs)
@@ -973,10 +981,94 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.genExprToAcc(expr.args[0], acc)
 
     of "tanh":
-      # Saturating soft clipper
+      # Real DSP56300 polynomial soft saturation: x * (1 - 1/3 * x^2)
       if expr.args.len >= 1:
-        ctx.genExprToAcc(expr.args[0], acc)
-        ctx.asmOut.add("                ; tanh soft saturation\n")
+        ctx.genExprToAcc(expr.args[0], "A")
+        ctx.asmOut.add("                MOVE    A, X0\n")
+        ctx.asmOut.add("                MPY     X0, X0, B\n")
+        ctx.asmOut.add("                MOVE    B, Y0\n")
+        ctx.asmOut.add("                MOVE    #$2AAAAA, Y1         ; 1/3 in Q23\n")
+        ctx.asmOut.add("                MPY     -Y0, Y1, B           ; -1/3 * x^2\n")
+        ctx.asmOut.add("                MOVE    #$7FFFFF, Y1         ; 1.0 in Q23\n")
+        ctx.asmOut.add("                ADD     Y1, B                ; 1.0 - 1/3 * x^2\n")
+        ctx.asmOut.add("                MOVE    B, Y1\n")
+        ctx.asmOut.add("                MPY     X0, Y1, " & acc & "            ; x * (1 - 1/3 * x^2)\n")
+
+    of "min":
+      if expr.args.len >= 2:
+        ctx.genExprToAcc(expr.args[0], "A")
+        if isLeaf(expr.args[1]):
+          ctx.loadToX0(expr.args[1])
+        else:
+          let spill = ctx.allocSpill()
+          ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+          ctx.genExprToAcc(expr.args[1], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+          ctx.freeSpill()
+        ctx.asmOut.add("                CMP     X0, A\n")
+        let lMinDone = ctx.nextLabel("_L_min_done")
+        ctx.asmOut.add("                JLE     " & lMinDone & "\n")
+        ctx.asmOut.add("                MOVE    X0, A\n")
+        ctx.asmOut.add(lMinDone & ":\n")
+        if acc != "A":
+          ctx.asmOut.add("                MOVE    A, " & acc & "\n")
+
+    of "max":
+      if expr.args.len >= 2:
+        ctx.genExprToAcc(expr.args[0], "A")
+        if isLeaf(expr.args[1]):
+          ctx.loadToX0(expr.args[1])
+        else:
+          let spill = ctx.allocSpill()
+          ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+          ctx.genExprToAcc(expr.args[1], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+          ctx.freeSpill()
+        ctx.asmOut.add("                CMP     X0, A\n")
+        let lMaxDone = ctx.nextLabel("_L_max_done")
+        ctx.asmOut.add("                JGE     " & lMaxDone & "\n")
+        ctx.asmOut.add("                MOVE    X0, A\n")
+        ctx.asmOut.add(lMaxDone & ":\n")
+        if acc != "A":
+          ctx.asmOut.add("                MOVE    A, " & acc & "\n")
+
+    of "clamp":
+      if expr.args.len >= 3:
+        ctx.genExprToAcc(expr.args[0], "A")
+        # Lower bound: if A < lo, A = lo
+        if isLeaf(expr.args[1]):
+          ctx.loadToX0(expr.args[1])
+        else:
+          let spill = ctx.allocSpill()
+          ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+          ctx.genExprToAcc(expr.args[1], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+          ctx.freeSpill()
+        ctx.asmOut.add("                CMP     X0, A\n")
+        let lClampLo = ctx.nextLabel("_L_clamp_lo")
+        ctx.asmOut.add("                JGE     " & lClampLo & "\n")
+        ctx.asmOut.add("                MOVE    X0, A\n")
+        ctx.asmOut.add(lClampLo & ":\n")
+        # Upper bound: if A > hi, A = hi
+        if isLeaf(expr.args[2]):
+          ctx.loadToX0(expr.args[2])
+        else:
+          let spill = ctx.allocSpill()
+          ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+          ctx.genExprToAcc(expr.args[2], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+          ctx.freeSpill()
+        ctx.asmOut.add("                CMP     X0, A\n")
+        let lClampHi = ctx.nextLabel("_L_clamp_hi")
+        ctx.asmOut.add("                JLE     " & lClampHi & "\n")
+        ctx.asmOut.add("                MOVE    X0, A\n")
+        ctx.asmOut.add(lClampHi & ":\n")
+        if acc != "A":
+          ctx.asmOut.add("                MOVE    A, " & acc & "\n")
 
     of "abs":
       if expr.args.len >= 1:
@@ -1271,6 +1363,11 @@ proc emitCExpr(expr: Expr): string =
         return "fmaxf(" & emitCExpr(expr.args[0]) & ", " & emitCExpr(expr.args[1]) & ")"
       else:
         return "0.0f"
+    of "clamp":
+      if expr.args.len >= 3:
+        return "fminf(fmaxf(" & emitCExpr(expr.args[0]) & ", " & emitCExpr(expr.args[1]) & "), " & emitCExpr(expr.args[2]) & ")"
+      else:
+        return emitCExpr(expr.args[0])
     else:
       var s = expr.callee & "("
       for i, a in expr.args:
