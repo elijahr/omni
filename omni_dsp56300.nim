@@ -33,6 +33,8 @@ type
     case kind*: ExprKind
     of ekNum:
       numVal*: float
+      isInt*: bool
+      intVal*: int32
     of ekSym:
       symName*: string
     of ekUnary:
@@ -98,6 +100,8 @@ type
     kind*: TokenKind
     strVal*: string
     numVal*: float
+    isInt*: bool
+    intVal*: int32
     line*: int
     col*: int
 
@@ -159,14 +163,29 @@ proc tokenizeLine(rawLine: string, lineNum: int): IndentedLine =
           i += 1
       let numStr = rawLine[start..<i]
       var val = 0.0
+      var isInt = false
+      var intVal: int32 = 0
       if isHex:
         try:
-          val = float(parseHexInt(numStr[2..^1]))
+          let h = parseHexInt(numStr[2..^1])
+          val = float(h)
+          intVal = int32(h)
+          isInt = true
         except ValueError:
           val = 0.0
       else:
-        discard parseFloat(numStr, val)
-      result.tokens.add(Token(kind: tkNumber, strVal: numStr, numVal: val, line: lineNum, col: col))
+        if '.' in numStr or 'e' in numStr or 'E' in numStr:
+          discard parseFloat(numStr, val)
+          isInt = false
+        else:
+          try:
+            intVal = int32(parseInt(numStr))
+            val = float(intVal)
+            isInt = true
+          except ValueError:
+            discard parseFloat(numStr, val)
+            isInt = false
+      result.tokens.add(Token(kind: tkNumber, strVal: numStr, numVal: val, isInt: isInt, intVal: intVal, line: lineNum, col: col))
       continue
 
     # Identifiers and keywords
@@ -326,7 +345,7 @@ proc parsePrimary(p: var Parser): Expr =
   case tok.kind
   of tkNumber:
     p.advanceTok()
-    return Expr(kind: ekNum, numVal: tok.numVal)
+    return Expr(kind: ekNum, numVal: tok.numVal, isInt: tok.isInt, intVal: tok.intVal)
 
   of tkIdent, kwTrue, kwFalse:
     var name = tok.strVal
@@ -694,6 +713,15 @@ proc floatToQ23Hex*(v: float): string =
   let u = uint32(q and 0x00FFFFFF)
   return "$" & u.toHex(6)
 
+proc exprToHex*(expr: Expr): string =
+  if expr != nil and expr.kind == ekNum:
+    if expr.isInt:
+      let u = uint32(expr.intVal and 0x00FFFFFF)
+      return "$" & u.toHex(6)
+    else:
+      return floatToQ23Hex(expr.numVal)
+  return "$000000"
+
 type
   Dsp56300ModuleAddresses* = object
     inletAddrs*: seq[uint32]   # Explicit addresses for in1..in8
@@ -811,7 +839,7 @@ proc loadToX0(ctx: var AsmContext, expr: Expr) =
       let mem = ctx.getMemOperand(s)
       ctx.asmOut.add("                MOVE    " & mem & ", X0\n")
   elif expr.kind == ekNum:
-    ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(expr.numVal) & ", X0\n")
+    ctx.asmOut.add("                MOVE    #" & exprToHex(expr) & ", X0\n")
   else:
     ctx.genExprToAcc(expr, "A")
     ctx.asmOut.add("                MOVE    A, X0\n")
@@ -830,7 +858,7 @@ proc loadToY0(ctx: var AsmContext, expr: Expr) =
       let mem = ctx.getMemOperand(s)
       ctx.asmOut.add("                MOVE    " & mem & ", Y0\n")
   elif expr.kind == ekNum:
-    ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(expr.numVal) & ", Y0\n")
+    ctx.asmOut.add("                MOVE    #" & exprToHex(expr) & ", Y0\n")
   else:
     ctx.genExprToAcc(expr, "A")
     ctx.asmOut.add("                MOVE    A, Y0\n")
@@ -928,7 +956,7 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
 
   case expr.kind
   of ekNum:
-    ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(expr.numVal) & ", " & acc & "\n")
+    ctx.asmOut.add("                MOVE    #" & exprToHex(expr) & ", " & acc & "\n")
 
   of ekSym:
     let s = expr.symName
@@ -1044,7 +1072,7 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
       if expr.rhs.kind == ekSym:
         ctx.loadToY0(expr.rhs)
       elif expr.rhs.kind == ekNum:
-        ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(expr.rhs.numVal) & ", Y0\n")
+        ctx.asmOut.add("                MOVE    #" & exprToHex(expr.rhs) & ", Y0\n")
       else:
         let spill = ctx.allocSpill()
         ctx.asmOut.add("                MOVE    X0, " & ctx.getMemOperand(spill) & "\n")
@@ -1099,7 +1127,7 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
       if expr.rhs.kind == ekSym:
         ctx.loadToX0(expr.rhs)
       elif expr.rhs.kind == ekNum:
-        ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(expr.rhs.numVal) & ", X0\n")
+        ctx.asmOut.add("                MOVE    #" & exprToHex(expr.rhs) & ", X0\n")
       else:
         let spill = ctx.allocSpill()
         ctx.asmOut.add("                MOVE    " & acc & ", " & ctx.getMemOperand(spill) & "\n")
@@ -1130,31 +1158,70 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
     case expr.callee
     of "sin":
       if expr.args.len >= 1:
+        # Full-range normalized sine for phase in [0, 1): 16 * u * (0.5 - u)
         ctx.genExprToAcc(expr.args[0], "A")
-        ctx.asmOut.add("                MOVE    A, X0\n")
-        ctx.asmOut.add("                MPY     X0, X0, B\n")
-        ctx.asmOut.add("                MOVE    B, Y0\n")
-        ctx.asmOut.add("                MOVE    #$155555, Y1         ; 1/6 for 3rd order Taylor\n")
-        ctx.asmOut.add("                MPY     -Y0, Y1, B\n")
-        ctx.asmOut.add("                MOVE    #$400000, Y1\n")
-        ctx.asmOut.add("                ADD     Y1, B\n")
-        ctx.asmOut.add("                MOVE    B, Y1\n")
-        ctx.asmOut.add("                MPY     X0, Y1, " & acc & "\n")
+        let lSinNeg = ctx.nextLabel("_L_sin_neg")
+        let lSinDone = ctx.nextLabel("_L_sin_done")
+        ctx.asmOut.add("                MOVE    #$7FFFFF, X0\n")
+        ctx.asmOut.add("                AND     X0, A                ; wrap to [0, 1)\n")
+        ctx.asmOut.add("                MOVE    #$400000, X0         ; 0.5\n")
+        ctx.asmOut.add("                CMP     X0, A\n")
+        ctx.asmOut.add("                JGE     " & lSinNeg & "\n")
+        ctx.asmOut.add("                MOVE    A, Y0                ; Y0 = u\n")
+        ctx.asmOut.add("                SUB     Y0, X0               ; X0 = 0.5 - u\n")
+        ctx.asmOut.add("                MPY     X0, Y0, A            ; A = u * (0.5 - u)\n")
+        ctx.asmOut.add("                ASL     A\n                ASL     A\n                ASL     A\n                ASL     A\n")
+        let lSinClamp = ctx.nextLabel("_L_sin_clamp")
+        ctx.asmOut.add("                MOVE    #$7FFFFF, X0\n")
+        ctx.asmOut.add("                CMP     X0, A\n")
+        ctx.asmOut.add("                JLE     " & lSinClamp & "\n")
+        ctx.asmOut.add("                MOVE    X0, A\n")
+        ctx.asmOut.add(lSinClamp & ":\n")
+        ctx.asmOut.add("                JMP     " & lSinDone & "\n")
+        ctx.asmOut.add(lSinNeg & ":\n")
+        ctx.asmOut.add("                SUB     X0, A                ; A = u - 0.5\n")
+        ctx.asmOut.add("                MOVE    A, Y0                ; Y0 = u'\n")
+        ctx.asmOut.add("                MOVE    #$400000, X0\n")
+        ctx.asmOut.add("                SUB     Y0, X0               ; X0 = 0.5 - u'\n")
+        ctx.asmOut.add("                MPY     -X0, Y0, A           ; A = -u' * (0.5 - u')\n")
+        ctx.asmOut.add("                ASL     A\n                ASL     A\n                ASL     A\n                ASL     A\n")
+        ctx.asmOut.add(lSinDone & ":\n")
+        if acc != "A":
+          ctx.asmOut.add("                MOVE    A, " & acc & "\n")
 
     of "cos":
       if expr.args.len >= 1:
         ctx.genExprToAcc(expr.args[0], "A")
-        ctx.asmOut.add("                MOVE    #$200000, X0         ; +0.25 phase shift\n")
+        ctx.asmOut.add("                MOVE    #$200000, X0         ; +0.25 phase shift for cos\n")
         ctx.asmOut.add("                ADD     X0, A\n")
-        ctx.asmOut.add("                MOVE    A, X0\n")
-        ctx.asmOut.add("                MPY     X0, X0, B\n")
-        ctx.asmOut.add("                MOVE    B, Y0\n")
-        ctx.asmOut.add("                MOVE    #$155555, Y1\n")
-        ctx.asmOut.add("                MPY     -Y0, Y1, B\n")
-        ctx.asmOut.add("                MOVE    #$400000, Y1\n")
-        ctx.asmOut.add("                ADD     Y1, B\n")
-        ctx.asmOut.add("                MOVE    B, Y1\n")
-        ctx.asmOut.add("                MPY     X0, Y1, " & acc & "\n")
+        let lCosNeg = ctx.nextLabel("_L_cos_neg")
+        let lCosDone = ctx.nextLabel("_L_cos_done")
+        ctx.asmOut.add("                MOVE    #$7FFFFF, X0\n")
+        ctx.asmOut.add("                AND     X0, A\n")
+        ctx.asmOut.add("                MOVE    #$400000, X0\n")
+        ctx.asmOut.add("                CMP     X0, A\n")
+        ctx.asmOut.add("                JGE     " & lCosNeg & "\n")
+        ctx.asmOut.add("                MOVE    A, Y0\n")
+        ctx.asmOut.add("                SUB     Y0, X0\n")
+        ctx.asmOut.add("                MPY     X0, Y0, A\n")
+        ctx.asmOut.add("                ASL     A\n                ASL     A\n                ASL     A\n                ASL     A\n")
+        let lCosClamp = ctx.nextLabel("_L_cos_clamp")
+        ctx.asmOut.add("                MOVE    #$7FFFFF, X0\n")
+        ctx.asmOut.add("                CMP     X0, A\n")
+        ctx.asmOut.add("                JLE     " & lCosClamp & "\n")
+        ctx.asmOut.add("                MOVE    X0, A\n")
+        ctx.asmOut.add(lCosClamp & ":\n")
+        ctx.asmOut.add("                JMP     " & lCosDone & "\n")
+        ctx.asmOut.add(lCosNeg & ":\n")
+        ctx.asmOut.add("                SUB     X0, A\n")
+        ctx.asmOut.add("                MOVE    A, Y0\n")
+        ctx.asmOut.add("                MOVE    #$400000, X0\n")
+        ctx.asmOut.add("                SUB     Y0, X0\n")
+        ctx.asmOut.add("                MPY     -X0, Y0, A\n")
+        ctx.asmOut.add("                ASL     A\n                ASL     A\n                ASL     A\n                ASL     A\n")
+        ctx.asmOut.add(lCosDone & ":\n")
+        if acc != "A":
+          ctx.asmOut.add("                MOVE    A, " & acc & "\n")
 
     of "tan":
       # Filter cutoff authentic polynomial: x * (1 + x^2 * (1/3 + 2/15 * x^2))
@@ -1308,20 +1375,38 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
 
     of "delay_read", "delay.read":
       # Circular delay buffer in Y: memory at ctx.addrs.delayBase
+      # Y:$delayBase stores write pointer wptr (0..63)
+      # Y:($delayBase + 1 .. $delayBase + 64) stores the 64-sample ring buffer
+      let delayBaseHex = toHex(int64(ctx.addrs.delayBase), 4)
+      let delayDataHex = toHex(int64(ctx.addrs.delayBase + 1), 4)
       if expr.args.len >= 1:
-        if expr.args[0].kind == ekNum:
-          let offset = uint32(expr.args[0].numVal)
-          let targetAddr = ctx.addrs.delayBase + offset
-          ctx.asmOut.add("                MOVE    Y:$" & toHex(int64(targetAddr), 4) & ", " & acc & "       ; delay_read(" & $offset & ")\n")
-        else:
-          ctx.genExprToAcc(expr.args[0], "A")
-          ctx.asmOut.add("                MOVE    A, X0\n")
-          ctx.asmOut.add("                MOVE    #$" & toHex(int64(ctx.addrs.delayBase), 4) & ", A\n")
-          ctx.asmOut.add("                ADD     X0, A\n")
-          ctx.asmOut.add("                MOVE    A, R0\n")
-          ctx.asmOut.add("                MOVE    Y:(R0), " & acc & "       ; delay_read(dynamic)\n")
+        ctx.genExprToAcc(expr.args[0], "A") # evaluate time/offset into A
+        let skipScaleLabel = ctx.nextLabel("_dly_time_ok")
+        ctx.asmOut.add("                MOVE    #$00003F, X0\n")
+        ctx.asmOut.add("                CMP     X0, A\n")
+        ctx.asmOut.add("                JLE     " & skipScaleLabel & "\n")
+        ctx.asmOut.add("                REP     #17\n")
+        ctx.asmOut.add("                ASR     A\n")
+        ctx.asmOut.add(skipScaleLabel & ":\n")
+        ctx.asmOut.add("                MOVE    #$00003F, X0\n")
+        ctx.asmOut.add("                AND     X0, A                            ; A = tap offset\n")
+        ctx.asmOut.add("                MOVE    A, X0\n")
+        ctx.asmOut.add("                MOVE    Y:$" & delayBaseHex & ", B       ; B = wptr\n")
+        ctx.asmOut.add("                SUB     X0, B                            ; B = wptr - tap\n")
+        let lTapPos = ctx.nextLabel("_dly_tap_pos")
+        ctx.asmOut.add("                TST     B\n")
+        ctx.asmOut.add("                JGE     " & lTapPos & "\n")
+        ctx.asmOut.add("                MOVE    #$000040, X0                     ; +64 if negative\n")
+        ctx.asmOut.add("                ADD     X0, B\n")
+        ctx.asmOut.add(lTapPos & ":\n")
+        ctx.asmOut.add("                MOVE    #$00003F, X0\n")
+        ctx.asmOut.add("                AND     X0, B                            ; wrap 0..63\n")
+        ctx.asmOut.add("                MOVE    #$" & delayDataHex & ", X0\n")
+        ctx.asmOut.add("                ADD     X0, B\n")
+        ctx.asmOut.add("                MOVE    B, R0\n")
+        ctx.asmOut.add("                MOVE    Y:(R0), " & acc & "              ; delay_read\n")
       else:
-        ctx.asmOut.add("                MOVE    Y:$" & toHex(int64(ctx.addrs.delayBase), 4) & ", " & acc & "\n")
+        ctx.asmOut.add("                MOVE    Y:$" & delayDataHex & ", " & acc & "\n")
 
     else:
       if expr.args.len >= 1:
@@ -1359,7 +1444,7 @@ proc genCondJump(ctx: var AsmContext, cond: Expr, targetLabel: string, jumpIfTru
     if cond.rhs.kind == ekSym:
       ctx.loadToX0(cond.rhs)
     elif cond.rhs.kind == ekNum:
-      ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(cond.rhs.numVal) & ", X0\n")
+      ctx.asmOut.add("                MOVE    #" & exprToHex(cond.rhs) & ", X0\n")
     else:
       let spill = ctx.allocSpill()
       ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
@@ -1462,13 +1547,23 @@ proc genStmt(ctx: var AsmContext, stmt: Stmt) =
     if stmt.callExpr != nil and stmt.callExpr.kind == ekCall and
         (stmt.callExpr.callee == "delay_write" or stmt.callExpr.callee == "delay.write"):
       if stmt.callExpr.args.len >= 1:
-        ctx.genExprToAcc(stmt.callExpr.args[0], "A")
-        if stmt.callExpr.args.len >= 2 and stmt.callExpr.args[1].kind == ekNum:
-          let offset = uint32(stmt.callExpr.args[1].numVal)
-          let targetAddr = ctx.addrs.delayBase + offset
-          ctx.asmOut.add("                MOVE    A, Y:$" & toHex(int64(targetAddr), 4) & "       ; delay_write(" & $offset & ")\n")
-        else:
-          ctx.asmOut.add("                MOVE    A, Y:$" & toHex(int64(ctx.addrs.delayBase), 4) & "       ; delay_write(0)\n")
+        ctx.genExprToAcc(stmt.callExpr.args[0], "B") # evaluate writeVal into B
+        let delayBaseHex = toHex(int64(ctx.addrs.delayBase), 4)
+        let delayDataHex = toHex(int64(ctx.addrs.delayBase + 1), 4)
+        ctx.asmOut.add("                MOVE    Y:$" & delayBaseHex & ", A       ; load wptr\n")
+        ctx.asmOut.add("                MOVE    #$00003F, X0\n")
+        ctx.asmOut.add("                AND     X0, A\n")
+        ctx.asmOut.add("                MOVE    #$" & delayDataHex & ", Y0\n")
+        ctx.asmOut.add("                ADD     Y0, A\n")
+        ctx.asmOut.add("                MOVE    A, R0\n")
+        ctx.asmOut.add("                MOVE    B, Y:(R0)                        ; delay_write\n")
+        # increment wptr
+        ctx.asmOut.add("                MOVE    Y:$" & delayBaseHex & ", A\n")
+        ctx.asmOut.add("                MOVE    #$000001, X0\n")
+        ctx.asmOut.add("                ADD     X0, A\n")
+        ctx.asmOut.add("                MOVE    #$00003F, X0\n")
+        ctx.asmOut.add("                AND     X0, A\n")
+        ctx.asmOut.add("                MOVE    A, Y:$" & delayBaseHex & "       ; update wptr\n")
     else:
       ctx.genExprToAcc(stmt.callExpr, "A")
 

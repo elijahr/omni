@@ -535,3 +535,84 @@ sample:
     check "X:$0090" in snippet # gainParam
     check "RTS" notin snippet
     check "ORG" notin snippet
+
+  test "OscA outputs Saw, Pulse, Triangle, and Sine when waveform parameter changes":
+    let oscPath = "/Users/eek/Development/rg2/dsp_modules/OscA.omni"
+    let m = parseOmniFile(oscPath)
+    let asmCode = emitDsp56300Asm(m)
+    let res = assembleText(asmCode)
+    check res.pRam.len > 0
+
+    let waveAddr = res.symbols["waveform"]
+    let phaseAddr = res.symbols["phase"]
+    let out1Addr = res.symbols["out1"]
+
+    var outputs: seq[uint32] = @[]
+    for waveVal in 0'u32 .. 3'u32:
+      var st = newDspState()
+      st.pc = 0x100'u32
+      for e in res.pRam: st.pRam[e.address] = e.word
+      for e in res.xRam: st.xRam[e.address] = e.word
+      for e in res.yRam: st.yRam[e.address] = e.word
+
+      st.xRam[waveAddr] = waveVal # waveform = 0, 1, 2, 3
+      st.yRam[phaseAddr] = 0x200000'u32 # phase = 0.25
+
+      for step in 0..<100:
+        if st.pc < 0x100'u32 or st.pRam[st.pc] == 0x00000C'u32: break
+        let blk = liftBasicBlock(st, st.pc, maxWords = 8)
+        discard runBlock(st, blk)
+
+      outputs.add(st.xRam[out1Addr])
+
+    # Waveform 0 (Saw): 2 * 0.25 - 1.0 = -0.5 ($C00000 +/- 2 LSB)
+    check outputs[0] >= 0xC00000'u32 and outputs[0] <= 0xC00002'u32
+    # Waveform 1 (Pulse): phase < 0.5 -> 1.0 ($7FFFFF)
+    check outputs[1] == 0x7FFFFF'u32
+    # Waveform 2 (Triangle): 4 * abs(0.25 - 0.5) - 1.0 = 0.0 ($000000 +/- 2 LSB)
+    check outputs[2] <= 0x000002'u32
+    # Waveform 3 (Sine): sin(0.25 * 2pi) = sin(pi/2) = 1.0 ($7FFFFF +/- 16 LSB)
+    check outputs[3] >= 0x7FFFF0'u32 and outputs[3] <= 0x7FFFFF'u32
+
+  test "DelaySingle delays an impulse by > 1 samples via circular ring buffer":
+    let dlyPath = "/Users/eek/Development/rg2/dsp_modules/DelaySingle.omni"
+    let m = parseOmniFile(dlyPath)
+    var addrs = defaultDsp56300Addresses()
+    addrs.inletAddrs = @[0x0110'u32] # in1 (impulse)
+    addrs.outletAddrs = @[0x0120'u32] # out1
+    addrs.paramBase = 0x0080'u32     # time = p0 (0x0080)
+    addrs.stateBase = 0x0020'u32
+    addrs.delayBase = 0x0200'u32     # ring buffer at Y:$0200
+
+    let snippet = compileOmniSnippet(m, addrs, labelPrefix = "dly_test")
+    var fullAsm = "        ORG     P:$0100\n"
+    fullAsm.add(snippet)
+    fullAsm.add("        RTS\n")
+
+    let res = assembleText(fullAsm)
+    check res.pRam.len > 0
+
+    var st = newDspState()
+    for e in res.pRam: st.pRam[e.address] = e.word
+
+    # Tap offset: time = 3 samples ($000003)
+    st.xRam[0x0080'u32] = 3'u32
+
+    # Feed impulse at sample 0: in1 = 1.0 ($7FFFFF)
+    # Then in1 = 0 for samples 1..5.
+    # Out1 must be 0 for samples 0, 1, 2, and 1.0 at sample 3!
+    var outSamples: seq[uint32] = @[]
+    for sampleIdx in 0 ..< 5:
+      st.pc = 0x100'u32
+      st.xRam[0x0110'u32] = if sampleIdx == 0: 0x7FFFFF'u32 else: 0'u32
+      for step in 0..<150:
+        if st.pc < 0x100'u32 or st.pRam[st.pc] == 0x00000C'u32: break
+        let blk = liftBasicBlock(st, st.pc, maxWords = 8)
+        discard runBlock(st, blk)
+      outSamples.add(st.xRam[0x0120'u32])
+
+    check outSamples[0] == 0'u32
+    check outSamples[1] == 0'u32
+    check outSamples[2] == 0'u32
+    check outSamples[3] == 0x7FFFFF'u32
+
