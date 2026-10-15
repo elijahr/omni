@@ -245,7 +245,7 @@ sample:
         check m.name & "_process" in cCode
         check m.name & "_alloc" in cCode
 
-    check count == 18
+    check count == 23
 
   test "Adversarial verification: min, max, clamp, tanh, and y + (a - b) * c execute accurately on DspState":
     # 1. Test y + (a - b) * c (compound subexpression under MAC, ensuring accumulator A is not clobbered)

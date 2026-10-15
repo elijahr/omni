@@ -701,6 +701,7 @@ type
     paramBase*: uint32         # Base address in X: for parameters (p0, p1, ...)
     stateBase*: uint32         # Base address in Y: for state variables (s0, s1, ...)
     delayBase*: uint32         # Base address in Y: for circular delay buffers
+    scratchBase*: uint32       # Base address in Y: for temporary scratch variables (default 0x0300)
     pOrg*: uint32              # Code origin in P: memory (default 0x0100)
     customAddrs*: bool         # True if caller specified custom relocated addresses
 
@@ -710,6 +711,7 @@ proc defaultDsp56300Addresses*(): Dsp56300ModuleAddresses =
   result.paramBase = 0x0020'u32
   result.stateBase = 0x0000'u32
   result.delayBase = 0x0400'u32
+  result.scratchBase = 0x0300'u32
   result.pOrg = 0x0100'u32
   result.customAddrs = false
 
@@ -775,6 +777,8 @@ proc getMemOperand(ctx: AsmContext, sym: string): string =
     return "X:$" & toHex(int64(ctx.paramAddrMap[sym]), 4)
   elif sym in ctx.stateAddrMap:
     return "Y:$" & toHex(int64(ctx.stateAddrMap[sym]), 4)
+  elif sym in ctx.tempTable and (ctx.addrs.customAddrs or ctx.tempTable[sym] > 0):
+    return "Y:$" & toHex(int64(ctx.tempTable[sym]), 4)
   elif sym in ctx.inNames or sym in ctx.outNames or sym in ctx.paramNames:
     return "X:" & sym
   elif sym in ctx.stateNames or sym in ctx.tempTable:
@@ -841,10 +845,10 @@ proc genDivide(ctx: var AsmContext, lhs: Expr, rhs: Expr, acc: string = "A") =
     ctx.loadToX0(rhs)
   else:
     let spill = ctx.allocSpill()
-    ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+    ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
     ctx.genExprToAcc(rhs, "A")
     ctx.asmOut.add("                MOVE    A, X0\n")
-    ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+    ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
     ctx.freeSpill()
 
   let lDivZero = ctx.nextLabel("_L_div_zero")
@@ -1043,10 +1047,10 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(expr.rhs.numVal) & ", Y0\n")
       else:
         let spill = ctx.allocSpill()
-        ctx.asmOut.add("                MOVE    X0, Y:" & spill & "\n")
+        ctx.asmOut.add("                MOVE    X0, " & ctx.getMemOperand(spill) & "\n")
         ctx.genExprToAcc(expr.rhs, acc)
         ctx.asmOut.add("                MOVE    " & acc & ", Y0\n")
-        ctx.asmOut.add("                MOVE    Y:" & spill & ", X0\n")
+        ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", X0\n")
         ctx.freeSpill()
       ctx.asmOut.add("                MPY     X0, Y0, " & acc & "\n")
       return
@@ -1098,10 +1102,10 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(expr.rhs.numVal) & ", X0\n")
       else:
         let spill = ctx.allocSpill()
-        ctx.asmOut.add("                MOVE    " & acc & ", Y:" & spill & "\n")
+        ctx.asmOut.add("                MOVE    " & acc & ", " & ctx.getMemOperand(spill) & "\n")
         ctx.genExprToAcc(expr.rhs, acc)
         ctx.asmOut.add("                MOVE    " & acc & ", X0\n")
-        ctx.asmOut.add("                MOVE    Y:" & spill & ", " & acc & "\n")
+        ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", " & acc & "\n")
         ctx.freeSpill()
 
       if op == "+":
@@ -1194,10 +1198,10 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
           ctx.loadToX0(expr.args[1])
         else:
           let spill = ctx.allocSpill()
-          ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+          ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
           ctx.genExprToAcc(expr.args[1], "A")
           ctx.asmOut.add("                MOVE    A, X0\n")
-          ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+          ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
           ctx.freeSpill()
         ctx.asmOut.add("                CMP     X0, A\n")
         let lMinDone = ctx.nextLabel("_L_min_done")
@@ -1214,10 +1218,10 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
           ctx.loadToX0(expr.args[1])
         else:
           let spill = ctx.allocSpill()
-          ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+          ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
           ctx.genExprToAcc(expr.args[1], "A")
           ctx.asmOut.add("                MOVE    A, X0\n")
-          ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+          ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
           ctx.freeSpill()
         ctx.asmOut.add("                CMP     X0, A\n")
         let lMaxDone = ctx.nextLabel("_L_max_done")
@@ -1235,10 +1239,10 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
           ctx.loadToX0(expr.args[1])
         else:
           let spill = ctx.allocSpill()
-          ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+          ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
           ctx.genExprToAcc(expr.args[1], "A")
           ctx.asmOut.add("                MOVE    A, X0\n")
-          ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+          ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
           ctx.freeSpill()
         ctx.asmOut.add("                CMP     X0, A\n")
         let lClampLo = ctx.nextLabel("_L_clamp_lo")
@@ -1250,10 +1254,10 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
           ctx.loadToX0(expr.args[2])
         else:
           let spill = ctx.allocSpill()
-          ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+          ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
           ctx.genExprToAcc(expr.args[2], "A")
           ctx.asmOut.add("                MOVE    A, X0\n")
-          ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+          ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
           ctx.freeSpill()
         ctx.asmOut.add("                CMP     X0, A\n")
         let lClampHi = ctx.nextLabel("_L_clamp_hi")
@@ -1358,10 +1362,10 @@ proc genCondJump(ctx: var AsmContext, cond: Expr, targetLabel: string, jumpIfTru
       ctx.asmOut.add("                MOVE    #" & floatToQ23Hex(cond.rhs.numVal) & ", X0\n")
     else:
       let spill = ctx.allocSpill()
-      ctx.asmOut.add("                MOVE    A, Y:" & spill & "\n")
+      ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
       ctx.genExprToAcc(cond.rhs, "A")
       ctx.asmOut.add("                MOVE    A, X0\n")
-      ctx.asmOut.add("                MOVE    Y:" & spill & ", A\n")
+      ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
       ctx.freeSpill()
 
     ctx.asmOut.add("                CMP     X0, A\n")
@@ -1469,10 +1473,13 @@ proc genStmt(ctx: var AsmContext, stmt: Stmt) =
       ctx.genExprToAcc(stmt.callExpr, "A")
 
 proc compileOmniSnippet*(m: OmniModule, addrs: Dsp56300ModuleAddresses, labelPrefix: string): string =
+  var localAddrs = addrs
+  localAddrs.customAddrs = true
+  let scratchStart = if localAddrs.scratchBase != 0: localAddrs.scratchBase else: 0x0300'u32
   var ctx = AsmContext(
     module: m,
-    addrs: addrs,
-    curTempAddr: addrs.stateBase + uint32(m.stateVars.len) + 16'u32,
+    addrs: localAddrs,
+    curTempAddr: scratchStart,
     spillCounter: 0,
     labelCounter: 0,
     labelPrefix: labelPrefix,
