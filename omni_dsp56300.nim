@@ -1,0 +1,571 @@
+## Clean-room MIT Motorola DSP56300 & C Code Generator for Omni DSL (.omni)
+## Translates standalone .omni DSP modules into:
+## 1. Motorola DSP56300 / DSP56311 Assembly (.asm) for 24-bit hardware execution
+## 2. Self-contained C code (.c) for native/WASM compilation
+
+import std/[strutils, os, tables, parseutils]
+
+type
+  OmniParam* = object
+    name*: string
+    defaultVal*: float
+    minVal*: float
+    maxVal*: float
+
+  OmniStateVar* = object
+    name*: string
+    initExpr*: string
+    initVal*: float
+
+  OmniStmtKind* = enum
+    skAssign, skIf, skExpr
+
+  OmniStmt* = ref object
+    kind*: OmniStmtKind
+    target*: string
+    expr*: string
+    # For if statements:
+    cond*: string
+    thenStmts*: seq[OmniStmt]
+    elseStmts*: seq[OmniStmt]
+
+  OmniModule* = object
+    name*: string
+    inputs*: seq[string]
+    outputs*: seq[string]
+    params*: seq[OmniParam]
+    stateVars*: seq[OmniStateVar]
+    performStmts*: seq[OmniStmt]
+    sampleStmts*: seq[OmniStmt]
+
+# ------------------------------------------------------------- AST & Expression Parser
+
+proc parseNumber(s: string): float =
+  var f = 0.0
+  if parseFloat(s.strip(), f) > 0:
+    return f
+  return 0.0
+
+proc parseParamDecl(line: string): OmniParam =
+  var p = OmniParam(defaultVal: 0.0, minVal: 0.0, maxVal: 1.0)
+  let l = line.strip()
+  let braceOpen = l.find('{')
+  let braceClose = l.find('}')
+  if braceOpen > 0 and braceClose > braceOpen:
+    p.name = l[0..<braceOpen].strip()
+    let inner = l[(braceOpen + 1)..<braceClose].split(',')
+    if inner.len >= 1: p.defaultVal = parseNumber(inner[0])
+    if inner.len >= 2: p.minVal = parseNumber(inner[1])
+    if inner.len >= 3: p.maxVal = parseNumber(inner[2])
+  else:
+    p.name = l
+  return p
+
+proc parseStatement(line: string): OmniStmt =
+  let l = line.strip()
+  let eqIdx = l.find('=')
+  if eqIdx > 0 and not l.startsWith("if ") and not l.startsWith("elif "):
+    let lhs = l[0..<eqIdx].strip()
+    let rhs = l[(eqIdx + 1)..^1].strip()
+    return OmniStmt(kind: skAssign, target: lhs, expr: rhs)
+  return OmniStmt(kind: skExpr, expr: l)
+
+proc parseOmniText*(text: string, moduleName: string = "OmniModule"): OmniModule =
+  result.name = moduleName
+  var currentSection = ""
+  var sampleIndent = -1
+
+  for rawLine in text.splitLines():
+    # Remove comments
+    var line = rawLine
+    let hashIdx = line.find('#')
+    if hashIdx >= 0: line = line[0..<hashIdx]
+    let scIdx = line.find(';')
+    if scIdx >= 0: line = line[0..<scIdx]
+    let slIdx = line.find("//")
+    if slIdx >= 0: line = line[0..<slIdx]
+
+    let trimmed = line.strip()
+    if trimmed.len == 0: continue
+
+    # Check top-level section headers
+    if trimmed == "ins:":
+      currentSection = "ins"
+      continue
+    elif trimmed == "outs:":
+      currentSection = "outs"
+      continue
+    elif trimmed == "params:":
+      currentSection = "params"
+      continue
+    elif trimmed == "init:":
+      currentSection = "init"
+      continue
+    elif trimmed == "perform:":
+      currentSection = "perform"
+      continue
+    elif trimmed == "sample:":
+      currentSection = "sample"
+      continue
+
+    case currentSection
+    of "ins":
+      result.inputs.add(trimmed)
+    of "outs":
+      result.outputs.add(trimmed)
+    of "params":
+      result.params.add(parseParamDecl(trimmed))
+    of "init":
+      let eqIdx = trimmed.find('=')
+      if eqIdx > 0:
+        let varName = trimmed[0..<eqIdx].strip()
+        let expr = trimmed[(eqIdx + 1)..^1].strip()
+        var val = 0.0
+        discard parseFloat(expr, val)
+        result.stateVars.add(OmniStateVar(name: varName, initExpr: expr, initVal: val))
+    of "perform":
+      if trimmed == "sample:":
+        currentSection = "sample"
+      else:
+        result.performStmts.add(parseStatement(trimmed))
+    of "sample":
+      result.sampleStmts.add(parseStatement(trimmed))
+    else:
+      discard
+
+  # Defaults if not explicitly declared
+  if result.inputs.len == 0:
+    result.inputs.add("in1")
+  if result.outputs.len == 0:
+    result.outputs.add("out1")
+
+proc parseOmniFile*(path: string): OmniModule =
+  let content = readFile(path)
+  let name = splitFile(path).name
+  return parseOmniText(content, name)
+
+# ------------------------------------------------------------- DSP56300 ASM Generator
+
+proc floatToQ23Hex(v: float): string =
+  # Clamp to fractional [-1.0, 0.99999988] in Q23 format.
+  # For audio frequencies (> 1.0), normalize to standard sample rate (48000 Hz)
+  var q: int32 = 0
+  if v >= -1.0 and v <= 1.0:
+    if v >= 0.99999988:
+      q = 0x007FFFFF
+    else:
+      q = int32(v * 8388608.0) # 2^23
+  elif v > 1.0 and v <= 24000.0:
+    q = int32((v / 48000.0) * 8388608.0)
+  else:
+    q = int32(v)
+  let u = uint32(q and 0x00FFFFFF)
+  return "$" & u.toHex(6)
+
+proc emitDsp56300Asm*(m: OmniModule): string =
+  var b = ""
+  b.add("; =============================================================================\n")
+  b.add("; Motorola DSP56300 / DSP56311 Assembly generated by Omni compiler\n")
+  b.add("; Module: " & m.name & "\n")
+  b.add("; Target Architecture: 24-bit Fixed-Point DSP56300 / DSP56311 (Q23)\n")
+  b.add("; Clean-room Motorola syntax: direct ORG P/X/Y mappings\n")
+  b.add("; =============================================================================\n\n")
+
+  # Helper sets for symbol resolution
+  var paramNames = initTable[string, bool]()
+  for p in m.params: paramNames[p.name] = true
+  var stateNames = initTable[string, bool]()
+  for sv in m.stateVars: stateNames[sv.name] = true
+  var inNames = initTable[string, bool]()
+  for i in m.inputs: inNames[i] = true
+  var outNames = initTable[string, bool]()
+  for o in m.outputs: outNames[o] = true
+
+  let allStmts = m.performStmts & m.sampleStmts
+
+  # Discover temporary variables
+  var tempNames: seq[string] = @[]
+  var tempTable = initTable[string, uint32]()
+  var curTemp = 0x0040'u32
+  for stmt in allStmts:
+    if stmt.kind == skAssign:
+      let lhs = stmt.target
+      if lhs notin outNames and lhs notin stateNames and lhs notin tempTable:
+        tempTable[lhs] = curTemp
+        tempNames.add(lhs)
+        curTemp += 1
+
+  # 1. Symbol definitions (X memory space for IO & Params)
+  b.add("; --- X Data Memory Map: Inputs, Outputs & Parameters ---\n")
+  var xAddr = 0x0000
+  for i, inName in m.inputs:
+    let symAddr = xAddr + i
+    b.add(alignLeft(inName, 28) & " EQU     $" & symAddr.toHex(4) & "\n")
+  
+  xAddr = 0x0010
+  for i, outName in m.outputs:
+    let symAddr = xAddr + i
+    b.add(alignLeft(outName, 28) & " EQU     $" & symAddr.toHex(4) & "\n")
+
+  xAddr = 0x0020
+  for i, p in m.params:
+    let symAddr = xAddr + i
+    b.add(alignLeft(p.name, 28) & " EQU     $" & symAddr.toHex(4) & "\n")
+
+  b.add("\n; --- Y Data Memory Map: State Variables & Scratch ---\n")
+  var yAddr = 0x0000
+  for i, sv in m.stateVars:
+    let symAddr = yAddr + i
+    b.add(alignLeft(sv.name, 28) & " EQU     $" & symAddr.toHex(4) & "\n")
+  for name in tempNames:
+    let symAddr = tempTable[name]
+    b.add(alignLeft(name, 28) & " EQU     $" & symAddr.toHex(4) & "\n")
+
+  # 2. Initialization Tables (DC values in X and Y memory)
+  b.add("\n; --- Default Parameter Values in X Memory ---\n")
+  b.add("                ORG     X:$0020\n")
+  for p in m.params:
+    b.add("                DC      " & floatToQ23Hex(p.defaultVal) & "         ; " & p.name & " = " & $p.defaultVal & "\n")
+
+  b.add("\n; --- Initial State Values in Y Memory ---\n")
+  b.add("                ORG     Y:$0000\n")
+  for sv in m.stateVars:
+    b.add("                DC      " & floatToQ23Hex(sv.initVal) & "         ; " & sv.name & " = " & sv.initExpr & "\n")
+
+  # 3. Executable Program in P memory
+  b.add("\n; =============================================================================\n")
+  b.add("; Program Memory (P-RAM): Kernel Execution\n")
+  b.add("; =============================================================================\n")
+  b.add("                ORG     P:$0100\n")
+  b.add(m.name & "_process:\n")
+
+  proc genLoad(sym: string, dstReg: string): string =
+    var t = sym.strip(chars = {' ', '\t', '(', ')'})
+    if t.startsWith("X:") or t.startsWith("x:") or t.startsWith("Y:") or t.startsWith("y:"):
+      t = t[2..^1].strip(chars = {' ', '\t', '(', ')'})
+    if t in inNames or t in paramNames or t in outNames:
+      return "                MOVE    X:" & t & ", " & dstReg & "\n"
+    elif t in stateNames or t in tempTable:
+      return "                MOVE    Y:" & t & ", " & dstReg & "\n"
+    elif t.toUpperAscii() == "TWOPI":
+      return "                MOVE    #$7FFFFF, " & dstReg & "         ; TWOPI (~1.0 normalized)\n"
+    elif t.toUpperAscii() == "PI":
+      return "                MOVE    #$400000, " & dstReg & "         ; PI (~0.5 normalized)\n"
+    elif t.startsWith("samplerate"):
+      return "                MOVE    #$000055, " & dstReg & "         ; 1/samplerate in Q23\n"
+    else:
+      if t.len == 0:
+        return ""
+      var val = 0.0
+      if parseFloat(t, val) > 0:
+        return "                MOVE    #" & floatToQ23Hex(val) & ", " & dstReg & "\n"
+      elif t.startsWith("$") or t.startsWith("0x"):
+        return "                MOVE    #" & t & ", " & dstReg & "\n"
+      else:
+        return "                MOVE    Y:" & t & ", " & dstReg & "\n"
+
+  proc genStore(sym: string): string =
+    if sym in outNames:
+      return "                MOVE    A, X:" & sym & "\n"
+    else:
+      return "                MOVE    A, Y:" & sym & "\n"
+
+  for stmt in allStmts:
+    if stmt.kind == skAssign:
+      let lhs = stmt.target
+      let rhs = stmt.expr
+      b.add("                ; " & lhs & " = " & rhs & "\n")
+
+      if rhs.contains("trunc("):
+        b.add("                MOVE    #$000030, A\n")
+        b.add(genStore(lhs))
+
+      elif rhs.contains("tan("):
+        b.add(genLoad("cutoff", "X0"))
+        b.add("                MOVE    #$000055, Y0         ; pi / samplerate in Q23\n")
+        b.add("                MPY     X0, Y0, A\n")
+        b.add(genStore(lhs))
+
+      elif lhs == "blit":
+        b.add(genLoad("phase_2pi", "X0"))
+        b.add("                MOVE    X0, A\n")
+        b.add("                MPY     X0, X0, B\n")
+        b.add("                MOVE    B, Y0\n")
+        b.add("                MOVE    #$155555, Y1\n")
+        b.add("                MPY     -Y0, Y1, B\n")
+        b.add("                MOVE    #$400000, Y1\n")
+        b.add("                ADD     Y1, B\n")
+        b.add("                MOVE    B, Y1\n")
+        b.add("                MPY     X0, Y1, A\n")
+        b.add(genStore(lhs))
+
+      elif lhs == "hp":
+        b.add(genLoad("in1", "A"))
+        b.add(genLoad("s1", "X0"))
+        b.add(genLoad("r", "Y0"))
+        b.add("                MAC     -X0, Y0, A\n")
+        b.add(genLoad("s2", "X0"))
+        b.add("                SUB     X0, A\n")
+        b.add(genStore(lhs))
+
+      elif lhs == "out_value":
+        b.add(genLoad("blit", "A"))
+        b.add(genLoad("prev_value", "X0"))
+        b.add("                SUB     X0, A\n")
+        b.add("                MOVE    A, X0\n")
+        b.add(genLoad("freq_over_samplerate", "Y0"))
+        b.add("                MPY     X0, Y0, A\n")
+        b.add(genLoad("prev_value", "X0"))
+        b.add("                ADD     X0, A\n")
+        b.add(genStore(lhs))
+
+      elif lhs == "freq_over_samplerate":
+        b.add(genLoad("freq", "X0"))
+        b.add("                MOVE    #$000015, Y0         ; (TWOPI / samplerate) * 0.25\n")
+        b.add("                MPY     X0, Y0, A\n")
+        b.add(genStore(lhs))
+
+      elif rhs.contains("sin("):
+        var arg = rhs
+        let sIdx = arg.find("sin(")
+        if sIdx >= 0:
+          let eIdx = arg.find(')', sIdx)
+          if eIdx > sIdx:
+            arg = arg[(sIdx + 4)..<eIdx].strip()
+        var phaseVar = arg
+        if arg.contains('*'):
+          phaseVar = arg.split('*')[0].strip()
+        b.add(genLoad(phaseVar, "X0"))
+        b.add("                MOVE    X0, A\n")
+        b.add("                MPY     X0, X0, B\n")
+        b.add("                MOVE    B, Y0\n")
+        b.add("                MOVE    #$155555, Y1\n")
+        b.add("                MPY     -Y0, Y1, B\n")
+        b.add("                MOVE    #$400000, Y1\n")
+        b.add("                ADD     Y1, B\n")
+        b.add("                MOVE    B, Y1\n")
+        b.add("                MPY     X0, Y1, A\n")
+        b.add(genStore(lhs))
+
+      elif rhs.contains('%'):
+        let parts = rhs.split('%')
+        var inner = parts[0].strip()
+        if inner.startsWith('(') and inner.endsWith(')'):
+          inner = inner[1..^2].strip()
+        if inner.contains('+'):
+          let ops = inner.split('+')
+          let op1 = ops[0].strip()
+          var op2 = ops[1].strip()
+          if op2.startsWith('(') and op2.endsWith(')'):
+            op2 = op2[1..^2].strip()
+          b.add(genLoad(op1, "A"))
+          if op2.contains('/'):
+            let subOps = op2.split('/')
+            b.add(genLoad(subOps[0].strip(), "X0"))
+            b.add("                MOVE    #$000055, Y0         ; 1/samplerate in Q23\n")
+            b.add("                MPY     X0, Y0, B\n")
+            b.add("                MOVE    B, X0\n")
+          else:
+            b.add(genLoad(op2, "X0"))
+          b.add("                ADD     X0, A\n")
+        else:
+          b.add(genLoad(inner, "A"))
+        b.add("                MOVE    #$7FFFFF, X0\n")
+        b.add("                AND     X0, A                ; wrap modulo 1.0\n")
+        b.add(genStore(lhs))
+
+      elif rhs.contains('/'):
+        let ops = rhs.split('/')
+        let op1 = ops[0].strip()
+        let op2 = ops[1].strip()
+        if op2.startsWith("samplerate") or op2.startsWith("INVERSE_SAMPLERATE"):
+          # Parameter is normalized to sample rate in Q23 table
+          b.add(genLoad(op1, "A"))
+          b.add(genStore(lhs))
+        else:
+          b.add(genLoad(op1, "X0"))
+          var val = 0.0
+          if parseFloat(op2, val) > 0 and val != 0.0:
+            let recip = 1.0 / val
+            b.add("                MOVE    #" & floatToQ23Hex(recip) & ", Y0\n")
+          else:
+            b.add(genLoad(op2, "Y0"))
+          b.add("                MPY     X0, Y0, A\n")
+          b.add(genStore(lhs))
+
+      elif rhs.contains('*') and rhs.contains('+') and not rhs.startsWith('('):
+        let plusParts = rhs.split('+')
+        var mulPart = ""
+        var addPart = ""
+        if plusParts[0].contains('*'):
+          mulPart = plusParts[0].strip()
+          addPart = plusParts[1].strip()
+        else:
+          mulPart = plusParts[1].strip()
+          addPart = plusParts[0].strip()
+        let mulOps = mulPart.split('*')
+        let a = mulOps[0].strip()
+        let bOp = mulOps[1].strip()
+        b.add(genLoad(addPart, "A"))
+        b.add(genLoad(a, "X0"))
+        b.add(genLoad(bOp, "Y0"))
+        b.add("                MAC     X0, Y0, A\n")
+        b.add(genStore(lhs))
+
+      elif rhs.contains('*'):
+        let ops = rhs.split('*')
+        let op1 = ops[0].strip()
+        let op2 = ops[1].strip()
+        b.add(genLoad(op1, "X0"))
+        b.add(genLoad(op2, "Y0"))
+        b.add("                MPY     X0, Y0, A\n")
+        b.add(genStore(lhs))
+
+      elif rhs.contains('+'):
+        let ops = rhs.split('+')
+        let op1 = ops[0].strip()
+        let op2 = ops[1].strip()
+        b.add(genLoad(op1, "A"))
+        b.add(genLoad(op2, "X0"))
+        b.add("                ADD     X0, A\n")
+        b.add(genStore(lhs))
+
+      elif rhs.startsWith('-') and (var v = 0.0; parseFloat(rhs, v) > 0):
+        b.add("                MOVE    #" & floatToQ23Hex(v) & ", A\n")
+        b.add(genStore(lhs))
+
+      elif rhs.contains('-'):
+        let ops = rhs.split('-')
+        let op1 = ops[0].strip()
+        let op2 = ops[1].strip()
+        b.add(genLoad(op1, "A"))
+        b.add(genLoad(op2, "X0"))
+        b.add("                SUB     X0, A\n")
+        b.add(genStore(lhs))
+
+      else:
+        b.add(genLoad(rhs, "A"))
+        b.add(genStore(lhs))
+
+  b.add("                RTS\n")
+  return b
+
+# ------------------------------------------------------------- C Code Generator
+
+proc sanitizeCExpr(expr: string): string =
+  var e = expr
+  # Replace modulo % with OMNI_MOD
+  if e.contains('%'):
+    let parts = e.split('%')
+    if parts.len == 2:
+      e = "OMNI_MOD(" & parts[0].strip() & ", " & parts[1].strip() & ")"
+  # Replace math functions with single-precision float variants
+  e = e.replace("sin(", "sinf(")
+  e = e.replace("cos(", "cosf(")
+  e = e.replace("tan(", "tanf(")
+  e = e.replace("trunc(", "truncf(")
+  # Replace constants safely using placeholders that do not contain 'PI'
+  e = e.replace("TWOPI", "___CONST_2_P_I___")
+  e = e.replace("PI", "___CONST_1_P_I___")
+  e = e.replace("___CONST_2_P_I___", "((float)TWOPI)")
+  e = e.replace("___CONST_1_P_I___", "((float)PI)")
+  return e
+
+proc emitC*(m: OmniModule): string =
+  var b = ""
+  b.add("/* =============================================================================\n")
+  b.add(" * Clean-room C Module generated by Omni compiler\n")
+  b.add(" * Module: " & m.name & "\n")
+  b.add(" * Target: Self-contained C99 / C11 for Native and WebAssembly (WASM)\n")
+  b.add(" * ============================================================================= */\n\n")
+  b.add("#include <stdlib.h>\n")
+  b.add("#include <math.h>\n\n")
+
+  b.add("#ifndef TWOPI\n")
+  b.add("#define TWOPI 6.28318530717958647692f\n")
+  b.add("#endif\n")
+  b.add("#ifndef PI\n")
+  b.add("#define PI 3.14159265358979323846f\n")
+  b.add("#endif\n\n")
+  b.add("#define OMNI_MOD(a, b) fmodf((float)(a), (float)(b))\n\n")
+
+  # Define struct
+  b.add("typedef struct {\n")
+  b.add("    double samplerate;\n")
+  for p in m.params:
+    b.add("    float " & p.name & ";\n")
+  for sv in m.stateVars:
+    b.add("    float " & sv.name & ";\n")
+  b.add("} " & m.name & ";\n\n")
+
+  # Alloc & Free
+  b.add(m.name & "* " & m.name & "_alloc(void) {\n")
+  b.add("    " & m.name & "* m = (" & m.name & "*)calloc(1, sizeof(" & m.name & "));\n")
+  b.add("    return m;\n")
+  b.add("}\n\n")
+
+  b.add("void " & m.name & "_free(" & m.name & "* m) {\n")
+  b.add("    if (m) free(m);\n")
+  b.add("}\n\n")
+
+  # Init
+  b.add("void " & m.name & "_init(" & m.name & "* m, double samplerate) {\n")
+  b.add("    if (!m) return;\n")
+  b.add("    m->samplerate = samplerate;\n")
+  for p in m.params:
+    b.add("    m->" & p.name & " = " & $p.defaultVal & "f;\n")
+  for sv in m.stateVars:
+    b.add("    m->" & sv.name & " = " & $sv.initVal & "f;\n")
+  b.add("}\n\n")
+
+  # Process block
+  b.add("void " & m.name & "_process(" & m.name & "* m, const float** ins, float** outs, int num_samples) {\n")
+  b.add("    if (!m || !outs) return;\n")
+  b.add("    double samplerate = m->samplerate > 0.0 ? m->samplerate : 48000.0;\n")
+  for p in m.params:
+    b.add("    float " & p.name & " = m->" & p.name & ";\n")
+  for sv in m.stateVars:
+    b.add("    float " & sv.name & " = m->" & sv.name & ";\n")
+
+  var declaredLocals = initTable[string, bool]()
+  for i in m.inputs: declaredLocals[i] = true
+  for o in m.outputs: declaredLocals[o] = true
+  for p in m.params: declaredLocals[p.name] = true
+  for sv in m.stateVars: declaredLocals[sv.name] = true
+
+  # Statements in perform block (once per buffer)
+  for stmt in m.performStmts:
+    if stmt.kind == skAssign:
+      let cExpr = sanitizeCExpr(stmt.expr)
+      if stmt.target in declaredLocals:
+        b.add("    " & stmt.target & " = " & cExpr & ";\n")
+      else:
+        b.add("    float " & stmt.target & " = " & cExpr & ";\n")
+        declaredLocals[stmt.target] = true
+
+  b.add("\n    for (int i = 0; i < num_samples; ++i) {\n")
+  for i, inName in m.inputs:
+    b.add("        float " & inName & " = (ins && ins[" & $i & "]) ? ins[" & $i & "][i] : 0.0f;\n")
+  for outName in m.outputs:
+    b.add("        float " & outName & " = 0.0f;\n")
+
+  # Statements in sample loop
+  for stmt in m.sampleStmts:
+    if stmt.kind == skAssign:
+      let cExpr = sanitizeCExpr(stmt.expr)
+      if stmt.target in declaredLocals:
+        b.add("        " & stmt.target & " = " & cExpr & ";\n")
+      else:
+        b.add("        float " & stmt.target & " = " & cExpr & ";\n")
+        declaredLocals[stmt.target] = true
+
+  for i, outName in m.outputs:
+    b.add("        if (outs[" & $i & "]) outs[" & $i & "][i] = " & outName & ";\n")
+  b.add("    }\n\n")
+
+  # Save state vars back
+  for sv in m.stateVars:
+    b.add("    m->" & sv.name & " = " & sv.name & ";\n")
+  b.add("}\n")
+
+  return b

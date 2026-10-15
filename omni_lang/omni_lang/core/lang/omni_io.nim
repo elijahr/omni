@@ -487,10 +487,26 @@ proc omni_build_default_min_max_arrays(num_of_inputs : int, default_vals : seq[f
 
 #This should be moved into its own "generate" function, as it is done for params and buffers...
 #Right now, this is explicitly called in the parser for perform / sample functions 
+proc getConstStrVal*(node: NimNode): string {.compileTime.} =
+    if node.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        return node.strVal
+    let impl = node.getImpl
+    if impl.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        return impl.strVal
+    if impl.kind == nnkConstDef and impl.len >= 3:
+        if impl[2].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+            return impl[2].strVal
+        elif impl[2].kind == nnkIdent:
+            return impl[2].strVal
+    try:
+        return node.strVal
+    except:
+        return ""
+
 macro omni_unpack_ins_perform*(ins_names : typed) : untyped =
     result = nnkStmtList.newTree()
 
-    let ins_names_seq = ins_names.getImpl.strVal.split(',')
+    let ins_names_seq = getConstStrVal(ins_names).split(',')
     
     for i, in_name in ins_names_seq:
         let in_number_name = ("in" & $(i+1))
