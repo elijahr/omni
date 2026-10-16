@@ -1,0 +1,24 @@
+# Nord Modular G2 - LogicClkDiv (Clock Divider / Counter)
+# Clean-Room MIT Implementation
+params:
+    division {0.5, 0.05, 1.0}
+
+init:
+    phase = 0.0
+    outState = 0.0
+    prevClk = 0.0
+
+sample:
+    div = division
+    if div == 0.0:
+        div = 0.5
+    if in1 > 0.5 and prevClk <= 0.5:
+        phase = phase + div
+        if phase >= 0.5:
+            phase = 0.0
+            if outState < 0.5:
+                outState = 1.0
+            else:
+                outState = 0.0
+    prevClk = in1
+    out1 = outState

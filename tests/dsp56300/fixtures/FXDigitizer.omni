@@ -1,0 +1,19 @@
+# Nord Modular G2 - FXDigitizer (Bitcrusher / Sample-Rate Reducer)
+# Clean-Room MIT Implementation
+params:
+    bits {0.8, 0.1, 1.0}
+    rateReduction {0.25, 0.05, 1.0}
+
+init:
+    holdVal = 0.0
+    phase = 1.0
+
+sample:
+    rate = rateReduction
+    if rate == 0.0:
+        rate = 0.25
+    phase = phase + rate
+    if phase >= 1.0:
+        phase = phase - 1.0
+        holdVal = in1
+    out1 = holdVal

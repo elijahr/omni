@@ -1,0 +1,15 @@
+# Nord Modular G2 - Switch1_2 (1-to-2 Signal Demultiplexer / Router)
+# Clean-Room MIT Implementation
+params:
+    state {0.0, 0.0, 1.0}
+
+sample:
+    sel = state
+    if in2 > 0.5:
+        sel = 1.0
+    if sel > 0.5:
+        out1 = 0.0
+        out2 = in1
+    else:
+        out1 = in1
+        out2 = 0.0

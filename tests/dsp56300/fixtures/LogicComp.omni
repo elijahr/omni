@@ -1,0 +1,10 @@
+# Nord Modular G2 - LogicComp (Logic Level Comparator)
+# Clean-Room MIT Implementation
+params:
+    threshold {0.5, -1.0, 1.0}
+
+sample:
+    if in1 > in2:
+        out1 = 1.0
+    else:
+        out1 = 0.0

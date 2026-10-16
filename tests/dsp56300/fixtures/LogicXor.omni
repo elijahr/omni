@@ -1,0 +1,13 @@
+# Nord Modular G2 - LogicXor (Boolean Exclusive-OR Gate)
+# Clean-Room MIT Implementation
+sample:
+    if in1 > 0.5:
+        if in2 <= 0.5:
+            out1 = 1.0
+        else:
+            out1 = 0.0
+    else:
+        if in2 > 0.5:
+            out1 = 1.0
+        else:
+            out1 = 0.0

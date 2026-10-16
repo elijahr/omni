@@ -1,0 +1,16 @@
+# Nord Modular G2 - EnvFollow (Envelope / Peak Follower)
+# Clean-Room MIT Implementation
+params:
+    attack {0.1, 0.001, 1.0}
+    decay {0.02, 0.001, 1.0}
+
+init:
+    envelope = 0.0
+
+sample:
+    rect = abs(in1)
+    if rect > envelope:
+        envelope = envelope + attack * (rect - envelope)
+    else:
+        envelope = envelope - decay * envelope
+    out1 = envelope

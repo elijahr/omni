@@ -1,0 +1,59 @@
+# Nord Modular G2 - EnvADSR (4-Stage Envelope Generator)
+# Clean-Room MIT Implementation
+params:
+    gate {1.0, 0.0, 1.0}
+    attack {0.02, 0.0001, 1.0}
+    decay {0.02, 0.0001, 1.0}
+    sustain {0.5, 0.0, 1.0}
+    release {0.02, 0.0001, 1.0}
+
+init:
+    stage = 0.0
+    level = 0.0
+
+sample:
+    gIn = in2
+    if gIn == 0.0:
+        gIn = gate
+    if gIn == 0.0:
+        gIn = in1
+        
+    att = attack
+    if att == 0.0:
+        att = 0.02
+    dec = decay
+    if dec == 0.0:
+        dec = 0.02
+    sust = sustain
+    if sust == 0.0:
+        sust = 0.5
+    rel = release
+    if rel == 0.0:
+        rel = 0.02
+        
+    if gIn > 0.0:
+        if stage == 0.0 or stage == 1.0:
+            stage = 0.25
+    else:
+        stage = 1.0
+        
+    if stage == 0.25:
+        level = level + att
+        if level >= 1.0:
+            level = 1.0
+            stage = 0.5
+    elif stage == 0.5:
+        level = level - dec
+        if level <= sust:
+            level = sust
+            stage = 0.75
+    elif stage == 0.75:
+        level = sust
+    elif stage == 1.0:
+        level = level - rel
+        if level <= 0.0:
+            level = 0.0
+            stage = 0.0
+            
+    out1 = level
+    out2 = in1 * level

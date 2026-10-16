@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import cligen, terminal, os, strutils, osproc
+import omni_dsp56300
 
 #Package version is passed as argument when building. It will be constant and set correctly
 const 
@@ -111,7 +112,7 @@ proc parseAndPrintCompilationString(msg : string) : bool =
     return false
 
 #Actual compiler
-proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : string = "", outDir : string = "", lib : string = "shared", architecture : string = "native",  compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[],exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
+proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : string = "", outDir : string = "", target : string = "", compileOnly : bool = false, lib : string = "shared", architecture : string = "native",  compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[],exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
 
     var 
         omniFile     = splitFile(fileFullPath)
@@ -141,6 +142,39 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
         printError("outDir: " & $outDirFullPath & " does not exist.")
         return 1
 
+    # Check if target is dsp56300 or c, or compileOnly
+    let effectiveTarget = if compileOnly: "c" else: target.toLowerAscii()
+
+    if effectiveTarget == "dsp56300" or effectiveTarget == "dsp56300asm":
+        let m = parseOmniFile(fileFullPath)
+        let asmCode = emitDsp56300Asm(m)
+        var asmOutName = if outName != "": outName else: omniFileName & ".asm"
+        if not asmOutName.endsWith(".asm"):
+            asmOutName.add(".asm")
+        let targetFilePath = outDirFullPath / asmOutName
+        writeFile(targetFilePath, asmCode)
+        printDone("'" & asmOutName & "' has been generated to folder \"" & $outDirFullPath & "\".")
+        return 0
+
+    elif effectiveTarget == "c":
+        let m = parseOmniFile(fileFullPath)
+        let cCode = emitC(m)
+        var cOutName = if outName != "": outName else: omniFileName & ".c"
+        if not cOutName.endsWith(".c"):
+            cOutName.add(".c")
+        let targetFilePath = outDirFullPath / cOutName
+        writeFile(targetFilePath, cCode)
+        printDone("'" & cOutName & "' has been generated to folder \"" & $outDirFullPath & "\".")
+        return 0
+
+    elif effectiveTarget == "asm":
+        printError("Target 'asm' is retired and ambiguous. Use '--target:dsp56300' (or '--target:dsp56300Asm') or the dedicated 'omnidsp' compiler.")
+        return 1
+
+    elif effectiveTarget != "":
+        printError("Target '" & target & "' is invalid. Valid targets are 'dsp56300' (or 'dsp56300Asm') and 'c'.")
+        return 1
+
     #Check performBits argument
     if performBits != "32" and performBits != "64" and performBits != "32/64":
         printError("performBits: " & $performBits & " is invalid. Valid values are '32', '64' and '32/64'.")
@@ -167,10 +201,12 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
         output_name = $lib_prepend & $omniFileName & $lib_extension
     else:
         output_name = $lib_prepend & $outName & $lib_extension
+    
+    #CD into out dir. This is needed by nim compiler to do --app:staticLib due to this bug: https://github.com/nim-lang/Nim/issues/12745
+    setCurrentDir(outDirFullPath)
 
     #If architecture == native, also pass the mtune=native flag.
     #If architecture == none, no architecture applied
-
     var real_architecture = ""
     if compiler == "clang" and architecture == "native" and hostCPU != "amd64":
         # clang on various non-x86 platforms doesn't like -march=native
@@ -196,8 +232,8 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
     
     #Actual compile command.
     var compile_command = 
-        "nim c --out:" & output_name & " --outDir:" & outDirFullPath & " --app:" & lib_nim & 
-        " --gc:none --noMain:on --panics:on --hints:off --checks:off --assertions:off" & 
+        "nim c --out:" & output_name & " --app:" & lib_nim & 
+        " --mm:none --noMain:on --panics:on --hints:off --checks:off --assertions:off" & 
         " --opt:speed -d:release -d:danger " & lto & " --passC:-fPIC " & real_architecture &
         " --warning[User]:off --warning[UnusedImport]:off --colors:off --stdout:on"
 
@@ -246,6 +282,11 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
     else:
         compile_command.add(" -d:omni_perform32 -d:omni_perform64")
 
+    #Always include local omni_lang path if it exists
+    let localOmniLangPath = currentSourcePath().parentDir / "omni_lang"
+    if localOmniLangPath.dirExists():
+        compile_command.add(" --path:\"" & localOmniLangPath & "\"")
+
     #Import omni_lang first
     compile_command.add(" --import:omni_lang")
     
@@ -262,10 +303,10 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
         compile_command.add(" " & $new_nim_flag)
 
     #Export IO
-    var omni_io_name = omniFileName & "_io.txt"
     var omni_io : string
-    compile_command.add(" -d:omni_export_io -d:tempDir:\"" & $outDirFullPath & "\" -d:omni_io_name:\"" & omni_io_name & "\"")
-    omni_io = outDirFullPath & "/" & omni_io_name
+    if exportIO:
+        compile_command.add(" -d:omni_export_io -d:tempDir:\"" & $outDirFullPath & "\"")
+        omni_io = outDirFullPath & "/omni_io.txt"
 
     #Finally, append the path to the actual omni file to compile:
     compile_command.add(" \"" & $fileFullPath & "\"")
@@ -277,7 +318,7 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
     let pathToCompiledLib = outDirFullPath & "/" & $output_name
     template removeCompiledLib() : untyped =
         removeFile(pathToCompiledLib)
-        removeFile(omni_io)
+        if exportIO: removeFile(omni_io)
 
     #Check for GcMem warnings and print errors out 
     if parseAndPrintCompilationString(compilationString):
@@ -293,13 +334,16 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
             printError("Failed compilation of '" & omniFileName & omniFileExt & "'.")
         return 1
 
-    #If sample / perform are undefined, omni_io will not exist
-    var failedOmniIOPerformCheck = true
-    if fileExists(omni_io):
-        failedOmniIOPerformCheck = false
-        if not exportIO: removeFile(omni_io)
+    #Check if Omni_UGenPerform32/64 are present, meaning perform/sample has been correctly specified. nm works with both shared and static libs!
+    when not defined(Windows):
+        let failedOmniCheckPerform = execCmd("nm \"" & $pathToCompiledLib & "\" | grep -q -F Omni_UGenPerform")            # -q == silent output
+    else:
+        let failedOmniCheckPerform = execShellCmd("nm \"" & $pathToCompiledLib & "\" | findstr Omni_UGenPerform >$null")   # >$null == silent output
+        if fileExists("$null"):
+            removeFile("$null")
 
-    if failedOmniIOPerformCheck:
+    #grep / findstr returns 0 if it finds the string, 1 if it doesn't
+    if failedOmniCheckPerform > 0:
         printError("Undefined 'perform' or 'sample' blocks.\n")
         removeCompiledLib()
         if is_multi:
@@ -323,11 +367,19 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
     return 0
 
 #Unpack files arg and pass it to compiler
-proc omni(files : seq[string], outName : string = "", outDir : string = "", lib : string = "shared", architecture : string = "native", compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[], exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
+proc omni(files : seq[string], outName : string = "", output : string = "", outDir : string = "", target : string = "", compileOnly : bool = false, lib : string = "shared", architecture : string = "native", compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[], exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
     #no files provided, print --version
     if files.len == 0:
         echo version_flag
         return 0
+
+    var effOutName = if output != "": output else: outName
+    var effOutDir = outDir
+    if effOutName != "":
+        let (d, n, ext) = splitFile(effOutName)
+        if d != "":
+            effOutDir = d
+            effOutName = n & ext
 
     for omniFile in files:
         #Get full extended path
@@ -337,9 +389,9 @@ proc omni(files : seq[string], outName : string = "", outDir : string = "", lib 
         if omniFileFullPath.fileExists():
             #if just one file in CLI, also pass the outName flag
             if files.len == 1:
-                return omni_single_file(false, omniFileFullPath, outName, outDir, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent)
+                return omni_single_file(false, omniFileFullPath, effOutName, effOutDir, target, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent)
             else:
-                if omni_single_file(true, omniFileFullPath, "", outDir, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
+                if omni_single_file(true, omniFileFullPath, "", effOutDir, target, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
                     return 1
 
         #If it's a dir, compile all .omni/.oi files in it
@@ -351,7 +403,7 @@ proc omni(files : seq[string], outName : string = "", outDir : string = "", lib 
                         dirFileExt = dirFileFullPath.splitFile().ext
                     
                     if dirFileExt == ".omni" or dirFileExt == ".oi":
-                        if omni_single_file(true, dirFileFullPath, "", outDir, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
+                        if omni_single_file(true, dirFileFullPath, "", effOutDir, target, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
                             return 1
 
         else:
@@ -385,6 +437,8 @@ dispatch(
     short = {
         "version" : 'v',
         "outName" : 'n',
+        "output" : 'o',
+        "target" : 't',
         "performBits" : 'b',
         "importModule" : 'm',
         "passNim" : 'p',
@@ -394,8 +448,11 @@ dispatch(
     help = {
         "help" : "CLIGEN-NOHELP",
         "version" : "CLIGEN-NOHELP",
-        "outName" : "Name for the output library. Defaults to the name of the input file with 'lib' prepended to it (e.g. 'OmniSaw.omni' -> 'libOmniSaw" & $shared_lib_extension & "'). This argument does not work for directories or multiple files.",
+        "outName" : "Name for the output library or file. Defaults to the name of the input file.",
+        "output" : "Output file path or name (alias for -n / --outName).",
         "outDir" : "Output folder. Defaults to the one of the Omni file(s) to compile.",
+        "target" : "Target compilation backend: 'dsp56300' / 'dsp56300Asm' (Motorola DSP56300 assembly) or 'c' (clean C99/C11 code).",
+        "compileOnly" : "Emit self-contained C code (.c). Shorthand for --target:c.",
         "lib" : "Build a 'shared' or 'static' library.",
         "architecture" : "Build architecture.",
         "compiler" : "Select a different C backend compiler to use. Omni supports all of Nim's C compilers.",
@@ -405,7 +462,7 @@ dispatch(
         "importModule" : "Import additional Nim modules to be compiled with the Omni file(s).",
         "passNim" : "Pass additional flags to the intermediate Nim compiler.",
         "exportHeader" : "Export the 'omni.h' header file together with the compiled lib.",
-        "exportIO" : "Export the IO txt file together with the compiled lib.",
+        "exportIO" : "Export the 'omni_io.txt' file together with the compiled lib.",
         "silent" : "CLIGEN-NOHELP"
     }
 )

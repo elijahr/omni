@@ -1,0 +1,12 @@
+# Nord Modular G2 - Glide (Portamento / Slew Rate Limiter)
+# Clean-Room MIT Implementation
+params:
+    rate {0.05, 0.001, 1.0}
+
+init:
+    current = 0.0
+
+sample:
+    diff = in1 - current
+    current = current + rate * diff
+    out1 = current

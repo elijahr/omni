@@ -1,0 +1,7 @@
+# Nord Modular G2 - LogicConv (Logic A/D and D/A Converter)
+# Clean-Room MIT Implementation
+sample:
+    if in1 > 0.5:
+        out1 = 1.0
+    else:
+        out1 = 0.0

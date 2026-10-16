@@ -1,0 +1,16 @@
+# Nord Modular G2 - SeqNote (Step Sequencer Note)
+# Clean-Room MIT Implementation
+params:
+    length {0.25, 0.05, 1.0}
+    step0 {0.5, 0.0, 1.0}
+
+init:
+    step = 0.0
+    prevClk = 0.0
+
+sample:
+    if in1 > 0.5 and prevClk <= 0.5:
+        step = (step + 0.0625) % 1.0
+    prevClk = in1
+    out1 = step0
+    out2 = step

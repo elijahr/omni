@@ -1,0 +1,8 @@
+# Nord Modular G2 - Mxr2_1 (2-to-1 Audio Mixer)
+# Clean-Room MIT Implementation
+params:
+    gain1 {0.5, 0.0, 1.0}
+    gain2 {0.5, 0.0, 1.0}
+
+sample:
+    out1 = (in1 * gain1) + (in2 * gain2)

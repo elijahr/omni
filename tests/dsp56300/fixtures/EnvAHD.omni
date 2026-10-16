@@ -1,0 +1,46 @@
+# Nord Modular G2 - EnvAHD (Attack-Hold-Decay Percussion Envelope)
+# Clean-Room MIT Implementation
+params:
+    attack {0.05, 0.001, 1.0}
+    hold {0.1, 0.001, 1.0}
+    decay {0.05, 0.001, 1.0}
+
+init:
+    stage = 0.0
+    level = 0.0
+    hCount = 0.0
+
+sample:
+    # Trigger on in1 or gate
+    trig = in1
+    if trig > 0.0 and stage == 0.0:
+        stage = 0.25
+        level = 0.0
+        hCount = hold
+        if hCount == 0.0:
+            hCount = 0.1
+        
+    att = attack
+    if att == 0.0:
+        att = 0.05
+    dec = decay
+    if dec == 0.0:
+        dec = 0.05
+
+    if stage == 0.25:
+        level = level + att
+        if level >= 1.0:
+            level = 1.0
+            stage = 0.5
+    elif stage == 0.5:
+        hCount = hCount - 0.005
+        if hCount <= 0.0:
+            stage = 0.75
+    elif stage == 0.75:
+        level = level - dec
+        if level <= 0.0:
+            level = 0.0
+            stage = 0.0
+            
+    out1 = level
+    out2 = in1 * level
