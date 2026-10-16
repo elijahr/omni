@@ -31,6 +31,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout dsp56300-nim dependency
+        run: |
+          git clone --depth 1 https://github.com/elijahr/dsp56300-nim.git ../dsp56300-nim
+
       - name: Setup Nim
         uses: jiro4989/setup-nim-action@v2
         with:
@@ -73,6 +77,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Checkout dsp56300-nim dependency
+        run: |
+          git clone --depth 1 https://github.com/elijahr/dsp56300-nim.git ../dsp56300-nim
 
       - name: Setup Nim baseline
         uses: jiro4989/setup-nim-action@v2

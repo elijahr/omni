@@ -39,6 +39,24 @@ proc getOmniLangPkgPath(): string =
     if dirExists(p1): return p1
     let p2 = (nimble_dir & "/pkgs2/omni_lang-" & omni_ver & "/omni_lang").normalizedPath().expandTilde()
     if dirExists(p2): return p2
+    let pkgs2Dir = (nimble_dir & "/pkgs2").normalizedPath().expandTilde()
+    if dirExists(pkgs2Dir):
+        for kind, path in walkDir(pkgs2Dir):
+            if kind == pcDir:
+                let base = path.extractFilename()
+                if base.startsWith("omni_lang-") or base.startsWith("omni_lang"):
+                    let candidate = path / "omni_lang"
+                    if dirExists(candidate):
+                        return candidate
+    let pkgsDir = (nimble_dir & "/pkgs").normalizedPath().expandTilde()
+    if dirExists(pkgsDir):
+        for kind, path in walkDir(pkgsDir):
+            if kind == pcDir:
+                let base = path.extractFilename()
+                if base.startsWith("omni_lang-") or base.startsWith("omni_lang"):
+                    let candidate = path / "omni_lang"
+                    if dirExists(candidate):
+                        return candidate
     return p1
 
 let omni_lang_pkg_path = getOmniLangPkgPath()
@@ -149,6 +167,14 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
         printDone("'" & cOutName & "' has been generated to folder \"" & $outDirFullPath & "\".")
         return 0
 
+    elif effectiveTarget == "asm":
+        printError("Target 'asm' is retired and ambiguous. Use '--target:dsp56300', '--emitAsm', or the dedicated 'omnidsp' compiler.")
+        return 1
+
+    elif effectiveTarget != "":
+        printError("Target '" & target & "' is invalid. Valid targets are 'dsp56300' (or 'dsp56300Asm') and 'c'.")
+        return 1
+
     #Check performBits argument
     if performBits != "32" and performBits != "64" and performBits != "32/64":
         printError("performBits: " & $performBits & " is invalid. Valid values are '32', '64' and '32/64'.")
@@ -181,14 +207,20 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
 
     #If architecture == native, also pass the mtune=native flag.
     #If architecture == none, no architecture applied
-    var real_architecture = "--passC:-march=" & $architecture
-    if architecture == "native":
-        real_architecture = real_architecture & " --passC:-mtune=native"
-    #x86_64 / amd64 as aliases for x86-64
-    elif architecture == "x86_64" or architecture == "amd64":
-        real_architecture = "--passC:-march=x86-64"
-    elif architecture == "none":
+    var real_architecture = ""
+    if compiler == "clang" and architecture == "native" and hostCPU != "amd64":
+        # clang on various non-x86 platforms doesn't like -march=native
+        # see https://stackoverflow.com/questions/65966969/why-does-march-native-not-work-on-apple-m1
         real_architecture = ""
+    else:
+        real_architecture = "--passC:-march=" & $architecture
+        if architecture == "native":
+            real_architecture = real_architecture & " --passC:-mtune=native"
+        #x86_64 / amd64 as aliases for x86-64
+        elif architecture == "x86_64" or architecture == "amd64":
+            real_architecture = "--passC:-march=x86-64"
+        elif architecture == "none":
+            real_architecture = ""
 
     #Add -d:lto only on Linux and Windows (not working on OSX + Clang yet: https://github.com/nim-lang/Nim/issues/15578)
     var lto = ""
