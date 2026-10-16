@@ -1,0 +1,7 @@
+# Nord Modular G2 - LogicGate (Gated Pass-Through)
+# Clean-Room MIT Implementation
+sample:
+    if in2 > 0.5:
+        out1 = in1
+    else:
+        out1 = 0.0

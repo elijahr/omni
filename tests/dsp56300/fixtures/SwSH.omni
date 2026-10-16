@@ -1,0 +1,12 @@
+# Nord Modular G2 - SwSH (Sample & Hold)
+# Clean-Room MIT Implementation
+init:
+    held = 0.0
+    prevClk = 0.0
+
+sample:
+    # in1 = Signal, in2 = Clock trigger
+    if in2 > 0.5 and prevClk <= 0.5:
+        held = in1
+    prevClk = in2
+    out1 = held

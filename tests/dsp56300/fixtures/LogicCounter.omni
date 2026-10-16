@@ -1,0 +1,19 @@
+# Nord Modular G2 - LogicCounter (Binary / Multi-Step Logic Counter)
+# Clean-Room MIT Implementation
+params:
+    step {0.125, 0.01, 1.0}
+
+init:
+    val = 0.0
+    prevClk = 0.0
+
+sample:
+    st = step
+    if st == 0.0:
+        st = 0.125
+    if in1 > 0.5 and prevClk <= 0.5:
+        val = val + st
+        if val >= 1.0:
+            val = 0.0
+    prevClk = in1
+    out1 = val

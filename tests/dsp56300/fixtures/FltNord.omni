@@ -1,0 +1,27 @@
+# Nord Modular G2 - FltNord (Signature 12/24dB Ladder with Saturation)
+# Clean-Room MIT Implementation
+params:
+    cutoff {0.5, 0.01, 0.99}
+    resonance {0.5, 0.0, 0.99}
+
+init:
+    s1 = 0.0
+    s2 = 0.0
+    s3 = 0.0
+    s4 = 0.0
+
+sample:
+    f = cutoff
+    if f == 0.0:
+        f = 0.5
+    f = f + in2
+    k = resonance * 0.95
+    u = in1 - k * s4
+
+    # Non-linear saturating stages
+    s1 = s1 + f * (tanh(u) - tanh(s1))
+    s2 = s2 + f * (tanh(s1) - tanh(s2))
+    s3 = s3 + f * (tanh(s2) - tanh(s3))
+    s4 = s4 + f * (tanh(s3) - tanh(s4))
+
+    out1 = s4

@@ -1,0 +1,13 @@
+# Nord Modular G2 - Switch2_1 (2-to-1 Signal Multiplexer / Selector)
+# Clean-Room MIT Implementation
+params:
+    state {0.0, 0.0, 1.0}
+
+sample:
+    sel = state
+    if in3 > 0.5:
+        sel = 1.0
+    if sel > 0.5:
+        out1 = in2
+    else:
+        out1 = in1

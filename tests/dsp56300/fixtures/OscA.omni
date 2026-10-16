@@ -1,0 +1,30 @@
+# Nord Modular G2 - OscA (Dual-Waveform Oscillator)
+# Clean-Room MIT Implementation
+params:
+    pitch {0.00458, 0.0, 1.0}
+    waveform {0.0, 0.0, 1.0}
+
+init:
+    phase = 0.0
+
+sample:
+    incr = in1
+    if incr == 0.0:
+        incr = pitch
+    if incr == 0.0:
+        incr = 0.00458
+        
+    if waveform < 0.25:
+        out1 = phase + phase - 1.0
+    elif waveform < 0.5:
+        if phase < 0.5:
+            out1 = 1.0
+        else:
+            out1 = -1.0
+    elif waveform < 0.75:
+        diff = abs(phase - 0.5)
+        out1 = diff + diff + diff + diff - 1.0
+    else:
+        out1 = sin(phase)
+
+    phase = (phase + incr) % 1.0

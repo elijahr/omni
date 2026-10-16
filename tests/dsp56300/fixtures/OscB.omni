@@ -1,0 +1,26 @@
+# Nord Modular G2 - OscB (Multi-Waveform Oscillator with Mod)
+# Clean-Room MIT Implementation
+params:
+    pitch {0.00458, 0.0, 1.0}
+    pw {0.5, 0.01, 0.99}
+
+init:
+    phase = 0.0
+
+sample:
+    incr = in1
+    if incr == 0.0:
+        incr = pitch
+    if incr == 0.0:
+        incr = 0.00458
+        
+    phase = (phase + incr) % 1.0
+
+    width = pw
+    if width == 0.0:
+        width = 0.5
+        
+    if phase < width:
+        out1 = 1.0
+    else:
+        out1 = -1.0

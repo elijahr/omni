@@ -31,6 +31,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout dsp56300-nim dependency
+        run: |
+          git clone --depth 1 https://github.com/elijahr/dsp56300-nim.git ../dsp56300-nim
+
       - name: Setup Nim
         uses: jiro4989/setup-nim-action@v2
         with:
@@ -63,3 +67,30 @@ jobs:
       - name: Run test suite
         run: |
           nimble test -Y
+
+  nimony:
+    name: 'Nimony Aufbruch (informational)'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout dsp56300-nim dependency
+        run: |
+          git clone --depth 1 https://github.com/elijahr/dsp56300-nim.git ../dsp56300-nim
+
+      - name: Setup Nim baseline
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.12'
+
+      - name: Install dependencies
+        run: |
+          nimble install -Y
+
+      - name: Verify Motorola DSP56300 and C pipeline under Nimony-ready ARC
+        run: |
+          nim c --mm:arc --threads:on -r tests/dsp56300/test_pipeline.nim || echo "::warning::Nimony ARC pipeline run exited non-zero (informational)"

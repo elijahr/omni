@@ -34,8 +34,8 @@ skipDirs = @["omni_lang"]
 #Install examples
 installDirs = @["examples"]
 
-#Compiler executable
-bin = @["omni"]
+#Compiler executables
+bin = @["omni", "omnidsp"]
 
 #Make sure omni-lang is getting installed first
 before install:

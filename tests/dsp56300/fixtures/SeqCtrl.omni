@@ -1,0 +1,28 @@
+# Nord Modular G2 - SeqCtrl (Control Voltage Step Sequencer)
+# Clean-Room MIT Implementation
+params:
+    val0 {0.2, 0.0, 1.0}
+    val1 {0.4, 0.0, 1.0}
+    val2 {0.6, 0.0, 1.0}
+    val3 {0.8, 0.0, 1.0}
+
+init:
+    step = 0.0
+    prevClk = 0.0
+
+sample:
+    if in1 > 0.5 and prevClk <= 0.5:
+        step = step + 0.25
+        if step >= 1.0:
+            step = 0.0
+    prevClk = in1
+
+    outVal = val0
+    if step >= 0.75:
+        outVal = val3
+    elif step >= 0.5:
+        outVal = val2
+    elif step >= 0.25:
+        outVal = val1
+
+    out1 = outVal

@@ -1,0 +1,27 @@
+# Nord Modular G2 - LfoA (Low Frequency Oscillator)
+# Clean-Room MIT Implementation
+params:
+    rate {0.02, 0.0001, 0.5}
+    waveform {0.0, 0.0, 1.0}
+
+init:
+    phase = 0.0
+
+sample:
+    incr = rate
+    if incr == 0.0:
+        incr = 0.02
+    incr = incr + in1 * 0.1
+    if waveform < 0.25:
+        out1 = sin(phase)
+    elif waveform < 0.5:
+        diff = abs(phase - 0.5)
+        out1 = diff + diff + diff + diff - 1.0
+    elif waveform < 0.75:
+        out1 = phase + phase - 1.0
+    else:
+        if phase < 0.5:
+            out1 = 1.0
+        else:
+            out1 = -1.0
+    phase = (phase + incr) % 1.0

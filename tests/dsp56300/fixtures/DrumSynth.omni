@@ -1,0 +1,30 @@
+# Nord Modular G2 - DrumSynth (Percussion & Analog Drum Synthesizer)
+# Clean-Room MIT Implementation
+params:
+    pitch {0.005, 0.0005, 0.05}
+    decay {0.15, 0.01, 1.0}
+    noiseMix {0.2, 0.0, 1.0}
+
+init:
+    phase = 0.0
+    env = 1.0
+    prevTrig = 0.0
+    noiseSeed = 0.37123
+
+sample:
+    if in1 > 0.5 and prevTrig <= 0.5:
+        env = 1.0
+    prevTrig = in1
+
+    curPitch = pitch * (1.0 + env * 2.0)
+    phase = (phase + curPitch) % 1.0
+    sineVal = sin(phase)
+    if noiseSeed < 0.5:
+        noiseSeed = (noiseSeed + noiseSeed) * 0.998 + 0.001
+    else:
+        noiseSeed = ((1.0 - noiseSeed) + (1.0 - noiseSeed)) * 0.998 + 0.001
+    diff = noiseSeed - 0.5
+    noiseVal = diff + diff
+    env = env * (1.0 - decay * 0.01)
+    tone = sineVal * (1.0 - noiseMix) + noiseVal * noiseMix
+    out1 = tone * env
