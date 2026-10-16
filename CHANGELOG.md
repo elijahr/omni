@@ -1,3 +1,23 @@
+## 0.4.2
+
+1) Abort if using a nim version != 1.6.0. 
+
+## 0.4.1
+
+1) Remove the use of `nm` to check the presence of `perform` / `sample` blocks.
+
+2) `Data[SomeNumber]` can now be accessed and replaced in the `perform` / `sample` blocks.
+
+3) `struct`'s default initialization of fields now support basic maths operations:
+
+    ```nim
+    struct Something: 
+        a = (PI * 2) + 25
+
+    init:
+        something = Something()
+    ```
+
 ## 0.4.0
 
 1) `def` now supports generics instantiation:
