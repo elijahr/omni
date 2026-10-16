@@ -1,0 +1,23 @@
+# Nord Modular G2 - FltHP (Chamberlin SVF Highpass Filter with Resonance)
+# Clean-Room MIT Implementation
+params:
+    cutoff {0.5, 0.01, 0.99}
+    resonance {0.3, 0.0, 0.98}
+
+init:
+    low = 0.0
+    band = 0.0
+
+sample:
+    cut = cutoff
+    if cut == 0.0:
+        cut = 0.5
+    cut = cut + in2
+    res = resonance
+    if res == 0.0:
+        res = 0.3
+
+    high = in1 - low - band * res
+    band = band + high * cut
+    low = low + band * cut
+    out1 = high

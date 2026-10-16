@@ -1,0 +1,15 @@
+# Nord Modular G2 - Pan (Stereo Panner)
+# Clean-Room MIT Implementation
+params:
+    pan {0.5, 0.0, 1.0}
+
+sample:
+    p = pan
+    if in2 != 0.0:
+        p = pan + in2 * 0.5
+    if p < 0.0:
+        p = 0.0
+    if p > 1.0:
+        p = 1.0
+    out1 = in1 * (1.0 - p)
+    out2 = in1 * p

@@ -1,0 +1,14 @@
+# Nord Modular G2 - DelaySingle (Single Delay Line)
+# Clean-Room MIT Implementation
+params:
+    time {0.5, 0.001, 1.0}
+    feedback {0.3, 0.0, 0.98}
+
+init:
+    dlyIdx = 0
+
+sample:
+    readVal = delay.read(time)
+    out1 = readVal
+    writeVal = in1 + readVal * feedback
+    delay.write(writeVal)

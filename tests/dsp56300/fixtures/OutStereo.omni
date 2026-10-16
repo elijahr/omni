@@ -1,0 +1,16 @@
+# Nord Modular G2 - OutStereo (Master Stereo Audio Output)
+# Clean-Room MIT Implementation
+params:
+    gain {1.0, 0.0, 1.0}
+    pan {0.0, -1.0, 1.0}
+
+sample:
+    # in1 = Left / Mono, in2 = Right
+    rIn = in2
+    if rIn == 0.0:
+        rIn = in1
+    g = gain
+    if g == 0.0:
+        g = 1.0
+    out1 = in1 * g * (1.0 - pan * 0.5)
+    out2 = rIn * g * (1.0 + pan * 0.5)

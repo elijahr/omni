@@ -1,0 +1,22 @@
+# Nord Modular G2 - Reverb (Reverberation Processor)
+# Clean-Room MIT Implementation
+params:
+    time {0.7, 0.01, 0.98}
+    damp {0.3, 0.0, 1.0}
+    mix {0.4, 0.0, 1.0}
+
+init:
+    s1 = 0.0
+    s2 = 0.0
+
+sample:
+    inSig = in1
+    dly1 = delay.read(time * 0.5)
+    dly2 = delay.read(time * 0.8)
+    s1 = dly1 * (1.0 - damp) + s1 * damp
+    s2 = dly2 * (1.0 - damp) + s2 * damp
+    wetL = inSig + s1 * 0.6
+    wetR = inSig + s2 * 0.6
+    delay.write(inSig + (s1 + s2) * 0.35)
+    out1 = inSig * (1.0 - mix) + wetL * mix
+    out2 = inSig * (1.0 - mix) + wetR * mix

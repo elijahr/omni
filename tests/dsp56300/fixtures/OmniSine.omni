@@ -1,0 +1,10 @@
+params:
+    freq {440, 0.01, 22000}
+
+init:
+    phase = 0.0
+
+sample:
+    freq_incr = freq / samplerate
+    out1 = sin(phase * TWOPI)
+    phase = (phase + freq_incr) % 1.0

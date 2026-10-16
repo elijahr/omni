@@ -1,0 +1,24 @@
+# Nord Modular G2 - FltLP (Chamberlin SVF Lowpass Filter)
+# Clean-Room MIT Implementation
+params:
+    mode {0.0, 0.0, 1.0}
+    cutoff {0.75, 0.01, 0.99}
+    resonance {0.25, 0.0, 0.98}
+
+init:
+    low = 0.0
+    band = 0.0
+
+sample:
+    cut = cutoff
+    if cut == 0.0:
+        cut = 0.75
+    cut = cut + in2
+    res = resonance
+    if res == 0.0:
+        res = 0.25
+        
+    high = in1 - low - band * res
+    band = band + high * cut
+    low = low + band * cut
+    out1 = low

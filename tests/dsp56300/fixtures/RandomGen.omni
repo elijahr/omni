@@ -1,0 +1,29 @@
+# Nord Modular G2 - RandomGen (Pseudo-Random Voltage Generator)
+# Clean-Room MIT Implementation
+params:
+    rate {0.5, 0.01, 1.0}
+
+init:
+    seed = 0.37123
+    held = 0.5
+    prevClk = 0.0
+    phase = 0.0
+
+sample:
+    trig = 0.0
+    if in1 > 0.5 and prevClk <= 0.5:
+        trig = 1.0
+    prevClk = in1
+
+    phase = (phase + rate * 0.005) % 1.0
+    if phase < 0.005:
+        trig = 1.0
+
+    if trig > 0.5:
+        if seed < 0.5:
+            seed = (seed + seed) * 0.998 + 0.001
+        else:
+            seed = ((1.0 - seed) + (1.0 - seed)) * 0.998 + 0.001
+        held = seed
+
+    out1 = held

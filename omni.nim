@@ -32,7 +32,16 @@ const
 let version_flag = "Omni - version " & $omni_ver & "\n(c) 2020-2021 Francesco Cameli"
 
 #Path to omni_lang
-const omni_lang_pkg_path = "~/.nimble/pkgs/omni_lang-" & omni_ver & "/omni_lang"
+proc getOmniLangPkgPath(): string =
+    let nimble_dir = if existsEnv("NIMBLE_DIR"): getEnv("NIMBLE_DIR")
+                     else: "~/.nimble"
+    let p1 = (nimble_dir & "/pkgs/omni_lang-" & omni_ver & "/omni_lang").normalizedPath().expandTilde()
+    if dirExists(p1): return p1
+    let p2 = (nimble_dir & "/pkgs2/omni_lang-" & omni_ver & "/omni_lang").normalizedPath().expandTilde()
+    if dirExists(p2): return p2
+    return p1
+
+let omni_lang_pkg_path = getOmniLangPkgPath()
 
 #Extension for static lib
 when defined(Linux):
@@ -118,7 +127,7 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
     # Check if target is dsp56300 or c, or emitAsm/compileOnly
     let effectiveTarget = if emitAsm: "dsp56300" elif compileOnly: "c" else: target.toLowerAscii()
 
-    if effectiveTarget == "dsp56300" or effectiveTarget == "asm":
+    if effectiveTarget == "dsp56300" or effectiveTarget == "dsp56300asm":
         let m = parseOmniFile(fileFullPath)
         let asmCode = emitDsp56300Asm(m)
         var asmOutName = if outName != "": outName else: omniFileName & ".asm"
@@ -410,7 +419,7 @@ dispatch(
         "outName" : "Name for the output library or file. Defaults to the name of the input file.",
         "output" : "Output file path or name (alias for -n / --outName).",
         "outDir" : "Output folder. Defaults to the one of the Omni file(s) to compile.",
-        "target" : "Target compilation backend: 'dsp56300' (Motorola DSP56300 assembly) or 'c' (clean C99/C11 code).",
+        "target" : "Target compilation backend: 'dsp56300' / 'dsp56300Asm' (Motorola DSP56300 assembly) or 'c' (clean C99/C11 code).",
         "emitAsm" : "Emit Motorola DSP56300 assembly (.asm). Shorthand for --target:dsp56300.",
         "compileOnly" : "Emit self-contained C code (.c). Shorthand for --target:c.",
         "lib" : "Build a 'shared' or 'static' library.",

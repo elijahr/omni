@@ -1,0 +1,7 @@
+# Nord Modular G2 - Gain (Gain / Level Amplifier)
+# Clean-Room MIT Implementation
+params:
+    gain {1.0, 0.0, 1.0}
+
+sample:
+    out1 = in1 * gain
