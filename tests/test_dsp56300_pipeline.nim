@@ -547,15 +547,16 @@ sample:
     let phaseAddr = res.symbols["phase"]
     let out1Addr = res.symbols["out1"]
 
+    let waveVals = [0x000000'u32, 0x00300000'u32, 0x00500000'u32, 0x007FFFFF'u32]
     var outputs: seq[uint32] = @[]
-    for waveVal in 0'u32 .. 3'u32:
+    for i in 0 .. 3:
       var st = newDspState()
       st.pc = 0x100'u32
       for e in res.pRam: st.pRam[e.address] = e.word
       for e in res.xRam: st.xRam[e.address] = e.word
       for e in res.yRam: st.yRam[e.address] = e.word
 
-      st.xRam[waveAddr] = waveVal # waveform = 0, 1, 2, 3
+      st.xRam[waveAddr] = waveVals[i] # waveform = 0, 0.375, 0.75, 1.0 (Q23 quartiles)
       st.yRam[phaseAddr] = 0x200000'u32 # phase = 0.25
 
       for step in 0..<100:
