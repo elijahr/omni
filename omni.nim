@@ -112,7 +112,7 @@ proc parseAndPrintCompilationString(msg : string) : bool =
     return false
 
 #Actual compiler
-proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : string = "", outDir : string = "", target : string = "", emitAsm : bool = false, compileOnly : bool = false, lib : string = "shared", architecture : string = "native",  compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[],exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
+proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : string = "", outDir : string = "", target : string = "", compileOnly : bool = false, lib : string = "shared", architecture : string = "native",  compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[],exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
 
     var 
         omniFile     = splitFile(fileFullPath)
@@ -142,8 +142,8 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
         printError("outDir: " & $outDirFullPath & " does not exist.")
         return 1
 
-    # Check if target is dsp56300 or c, or emitAsm/compileOnly
-    let effectiveTarget = if emitAsm: "dsp56300" elif compileOnly: "c" else: target.toLowerAscii()
+    # Check if target is dsp56300 or c, or compileOnly
+    let effectiveTarget = if compileOnly: "c" else: target.toLowerAscii()
 
     if effectiveTarget == "dsp56300" or effectiveTarget == "dsp56300asm":
         let m = parseOmniFile(fileFullPath)
@@ -168,7 +168,7 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
         return 0
 
     elif effectiveTarget == "asm":
-        printError("Target 'asm' is retired and ambiguous. Use '--target:dsp56300', '--emitAsm', or the dedicated 'omnidsp' compiler.")
+        printError("Target 'asm' is retired and ambiguous. Use '--target:dsp56300' (or '--target:dsp56300Asm') or the dedicated 'omnidsp' compiler.")
         return 1
 
     elif effectiveTarget != "":
@@ -367,7 +367,7 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
     return 0
 
 #Unpack files arg and pass it to compiler
-proc omni(files : seq[string], outName : string = "", output : string = "", outDir : string = "", target : string = "", emitAsm : bool = false, compileOnly : bool = false, lib : string = "shared", architecture : string = "native", compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[], exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
+proc omni(files : seq[string], outName : string = "", output : string = "", outDir : string = "", target : string = "", compileOnly : bool = false, lib : string = "shared", architecture : string = "native", compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[], exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
     #no files provided, print --version
     if files.len == 0:
         echo version_flag
@@ -389,9 +389,9 @@ proc omni(files : seq[string], outName : string = "", output : string = "", outD
         if omniFileFullPath.fileExists():
             #if just one file in CLI, also pass the outName flag
             if files.len == 1:
-                return omni_single_file(false, omniFileFullPath, effOutName, effOutDir, target, emitAsm, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent)
+                return omni_single_file(false, omniFileFullPath, effOutName, effOutDir, target, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent)
             else:
-                if omni_single_file(true, omniFileFullPath, "", effOutDir, target, emitAsm, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
+                if omni_single_file(true, omniFileFullPath, "", effOutDir, target, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
                     return 1
 
         #If it's a dir, compile all .omni/.oi files in it
@@ -403,7 +403,7 @@ proc omni(files : seq[string], outName : string = "", output : string = "", outD
                         dirFileExt = dirFileFullPath.splitFile().ext
                     
                     if dirFileExt == ".omni" or dirFileExt == ".oi":
-                        if omni_single_file(true, dirFileFullPath, "", effOutDir, target, emitAsm, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
+                        if omni_single_file(true, dirFileFullPath, "", effOutDir, target, compileOnly, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
                             return 1
 
         else:
@@ -452,7 +452,6 @@ dispatch(
         "output" : "Output file path or name (alias for -n / --outName).",
         "outDir" : "Output folder. Defaults to the one of the Omni file(s) to compile.",
         "target" : "Target compilation backend: 'dsp56300' / 'dsp56300Asm' (Motorola DSP56300 assembly) or 'c' (clean C99/C11 code).",
-        "emitAsm" : "Emit Motorola DSP56300 assembly (.asm). Shorthand for --target:dsp56300.",
         "compileOnly" : "Emit self-contained C code (.c). Shorthand for --target:c.",
         "lib" : "Build a 'shared' or 'static' library.",
         "architecture" : "Build architecture.",
