@@ -1570,7 +1570,7 @@ proc genStmt(ctx: var AsmContext, stmt: Stmt) =
 proc compileOmniSnippet*(m: OmniModule, addrs: Dsp56300ModuleAddresses, labelPrefix: string): string =
   var localAddrs = addrs
   localAddrs.customAddrs = true
-  let scratchStart = if localAddrs.scratchBase != 0: localAddrs.scratchBase else: 0x0300'u32
+  let scratchStart = if localAddrs.scratchBase != 0: localAddrs.scratchBase else: 0x0200'u32
   var ctx = AsmContext(
     module: m,
     addrs: localAddrs,
