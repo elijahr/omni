@@ -43,11 +43,26 @@ Options:
   -d=, --define=        {}        Define additional symbols for the intermediate Nim compiler.
   -m=, --importModule=  {}        Import additional Nim modules to be compiled with the Omni file(s).
   -p=, --passNim=       {}        Pass additional flags to the intermediate Nim compiler.
+  -t=, --target=        ""        Target compilation backend: 'dsp56300' / 'dsp56300Asm' (Motorola DSP56300 assembly)
+                                  or 'c' (clean C99/C11 code).
+  -c,  --compileOnly    false     Emit self-contained C code (.c). Shorthand for --target:c.
   -e, --exportHeader    true      Export the 'omni.h' header file together with the compiled lib.
   -i, --exportIO        false     Export the 'omni_io.txt' file together with the compiled lib.
 ```
 
-When running the `omni` compiler, the output is either a static or shared library (depending on the `--lib` flag). Along with it, an `omni.h` file (depending on the `--exportHeader` flag) containing all the callable functions in the shared/static library will be exported.
+When running the `omni` compiler, the output is either a static or shared library (depending on the `--lib` flag), a Motorola DSP56300 assembly file (`--target:dsp56300`), or clean C code (`--target:c`). Along with it, an `omni.h` file (depending on the `--exportHeader` flag) containing all the callable functions in the shared/static library will be exported.
+
+## The omnidsp CLI
+
+Omni includes a dedicated standalone CLI compiler `omnidsp` for compiling Omni DSP descriptions into 24-bit fixed-point Motorola DSP56300 / DSP56311 assembly and C:
+
+```bash
+# Compile Omni source directly to Motorola DSP56300 assembly (.asm)
+omnidsp OmniSine.omni -o OmniSine.asm
+
+# Compile Omni source directly to clean C (.c)
+omnidsp OmniSine.omni --target:c -o OmniSine.c
+```
 
 ## Documentation
 
@@ -74,3 +89,5 @@ When running the `omni` compiler, the output is either a static or shared librar
 ### [11 - Writing wrappers](/docs/11_writing_wrappers.md)
 
 ### [12 - Nim interoperability](/docs/12_nim_interop.md)
+
+### [13 - Motorola DSP56300 & C Backends](/docs/13_dsp56300.md)
