@@ -819,3 +819,50 @@ sample:
     check outSamples[1] == 0'u32
     check outSamples[2] == 0'u32
     check outSamples[3] == 0x7FFFFF'u32
+
+  test "24-bit Galois LFSR 0x40001B, bitwise ops, and cubic saturation execute accurately on DspState":
+    let omniCode = """
+# Test LFSR, bitwise ops, cubic saturation, and poly5
+outs:
+    out1
+    out2
+
+init:
+    state = -1.0
+
+sample:
+    nextState = lfsr(state)
+    masked = bitand(nextState, 0x00FF00)
+    xored = bitxor(masked, 0x0000FF)
+    ored = bitor(xored, 0x000001)
+    sat = saturate(0.5)
+    p5 = poly5(0.5)
+    out1 = sat
+    out2 = p5
+    state = nextState
+"""
+    let m = parseOmniText(omniCode, "TestPrimitives")
+    let asmCode = emitDsp56300Asm(m)
+    let res = assembleText(asmCode)
+    check res.pRam.len > 0
+
+    var st = newDspState()
+    st.pc = 0x100'u32
+    for e in res.pRam: st.pRam[e.address] = e.word
+    for e in res.xRam: st.xRam[e.address] = e.word
+    for e in res.yRam: st.yRam[e.address] = e.word
+
+    for step in 0..<150:
+      if st.pc < 0x100'u32 or st.pRam[st.pc] == 0x00000C'u32: break
+      let blk = liftBasicBlock(st, st.pc, maxWords = 8)
+      discard runBlock(st, blk)
+
+    let stateAddr = res.symbols["state"]
+    let stateVal = st.yRam[stateAddr]
+    check stateVal == 0x40001B'u32
+    let out1Addr = res.symbols["out1"]
+    let satVal = st.xRam[out1Addr]
+    check satVal >= 0x3AA000'u32 and satVal <= 0x3AB000'u32
+    let out2Addr = res.symbols["out2"]
+    let p5Val = st.xRam[out2Addr]
+    check p5Val >= 0x5A0000'u32 and p5Val <= 0x5B0000'u32

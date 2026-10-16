@@ -87,13 +87,14 @@ type
     tkIdent,
     tkNumber,
     tkPlus, tkMinus, tkStar, tkSlash, tkPercent,
+    tkAmp, tkPipe, tkCaret,
     tkAssign, tkPlusAssign, tkMinusAssign, tkStarAssign, tkSlashAssign,
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe,
     tkLParen, tkRParen, tkLBrace, tkRBrace, tkLBracket, tkRBracket,
     tkColon, tkComma, tkDot,
     # Keywords
     kwIf, kwElif, kwElse, kwWhile, kwFor, kwIn,
-    kwAnd, kwOr, kwNot, kwTrue, kwFalse,
+    kwAnd, kwOr, kwNot, kwXor, kwTrue, kwFalse,
     kwIns, kwOuts, kwParams, kwInit, kwPerform, kwSample
 
   Token* = object
@@ -204,6 +205,7 @@ proc tokenizeLine(rawLine: string, lineNum: int): IndentedLine =
       of "in": kind = kwIn
       of "and": kind = kwAnd
       of "or": kind = kwOr
+      of "xor": kind = kwXor
       of "not": kind = kwNot
       of "true", "True": kind = kwTrue
       of "false", "False": kind = kwFalse
@@ -255,6 +257,9 @@ proc tokenizeLine(rawLine: string, lineNum: int): IndentedLine =
     of '*': result.tokens.add(Token(kind: tkStar, strVal: "*", line: lineNum, col: col))
     of '/': result.tokens.add(Token(kind: tkSlash, strVal: "/", line: lineNum, col: col))
     of '%': result.tokens.add(Token(kind: tkPercent, strVal: "%", line: lineNum, col: col))
+    of '&': result.tokens.add(Token(kind: tkAmp, strVal: "&", line: lineNum, col: col))
+    of '|': result.tokens.add(Token(kind: tkPipe, strVal: "|", line: lineNum, col: col))
+    of '^': result.tokens.add(Token(kind: tkCaret, strVal: "^", line: lineNum, col: col))
     of '=': result.tokens.add(Token(kind: tkAssign, strVal: "=", line: lineNum, col: col))
     of '<': result.tokens.add(Token(kind: tkLt, strVal: "<", line: lineNum, col: col))
     of '>': result.tokens.add(Token(kind: tkGt, strVal: ">", line: lineNum, col: col))
@@ -313,17 +318,22 @@ proc currIndent(p: Parser): int =
 # Precedence levels for binary operators
 proc getBinaryPrec(kind: TokenKind): int =
   case kind
-  of kwOr: 1
-  of kwAnd: 2
-  of tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe: 3
-  of tkPlus, tkMinus: 4
-  of tkStar, tkSlash, tkPercent: 5
+  of kwOr, tkPipe: 1
+  of kwXor, tkCaret: 2
+  of kwAnd, tkAmp: 3
+  of tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe: 4
+  of tkPlus, tkMinus: 5
+  of tkStar, tkSlash, tkPercent: 6
   else: -1
 
 proc getBinaryOpStr(kind: TokenKind): string =
   case kind
   of kwOr: "or"
+  of tkPipe: "|"
+  of kwXor: "xor"
+  of tkCaret: "^"
   of kwAnd: "and"
+  of tkAmp: "&"
   of tkEq: "=="
   of tkNeq: "!="
   of tkLt: "<"
@@ -437,6 +447,9 @@ proc evalConstExpr*(expr: Expr, samplerate: float = 48000.0, knownVars: Table[st
     of "*": return l * r
     of "/": return if r != 0.0: l / r else: 0.0
     of "%": return if r != 0.0: (let divVal = floor(l / r); l - divVal * r) else: 0.0
+    of "&": return float(int64(l) and int64(r))
+    of "|": return float(int64(l) or int64(r))
+    of "^", "xor": return float(int64(l) xor int64(r))
     else: return 0.0
   of ekCall:
     if expr.callee == "trunc" and expr.args.len >= 1:
@@ -1142,6 +1155,57 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.asmOut.add("                SUB     X0, " & acc & "\n")
       return
 
+    # Bitwise AND: a & b
+    if op == "&":
+      ctx.genExprToAcc(expr.lhs, acc)
+      if expr.rhs.kind == ekSym:
+        ctx.loadToX0(expr.rhs)
+      elif expr.rhs.kind == ekNum:
+        ctx.asmOut.add("                MOVE    #" & exprToHex(expr.rhs) & ", X0\n")
+      else:
+        let spill = ctx.allocSpill()
+        ctx.asmOut.add("                MOVE    " & acc & ", " & ctx.getMemOperand(spill) & "\n")
+        ctx.genExprToAcc(expr.rhs, acc)
+        ctx.asmOut.add("                MOVE    " & acc & ", X0\n")
+        ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", " & acc & "\n")
+        ctx.freeSpill()
+      ctx.asmOut.add("                AND     X0, " & acc & "\n")
+      return
+
+    # Bitwise OR: a | b
+    if op == "|":
+      ctx.genExprToAcc(expr.lhs, acc)
+      if expr.rhs.kind == ekSym:
+        ctx.loadToX0(expr.rhs)
+      elif expr.rhs.kind == ekNum:
+        ctx.asmOut.add("                MOVE    #" & exprToHex(expr.rhs) & ", X0\n")
+      else:
+        let spill = ctx.allocSpill()
+        ctx.asmOut.add("                MOVE    " & acc & ", " & ctx.getMemOperand(spill) & "\n")
+        ctx.genExprToAcc(expr.rhs, acc)
+        ctx.asmOut.add("                MOVE    " & acc & ", X0\n")
+        ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", " & acc & "\n")
+        ctx.freeSpill()
+      ctx.asmOut.add("                OR      X0, " & acc & "\n")
+      return
+
+    # Bitwise XOR: a ^ b
+    if op == "^" or op == "xor":
+      ctx.genExprToAcc(expr.lhs, acc)
+      if expr.rhs.kind == ekSym:
+        ctx.loadToX0(expr.rhs)
+      elif expr.rhs.kind == ekNum:
+        ctx.asmOut.add("                MOVE    #" & exprToHex(expr.rhs) & ", X0\n")
+      else:
+        let spill = ctx.allocSpill()
+        ctx.asmOut.add("                MOVE    " & acc & ", " & ctx.getMemOperand(spill) & "\n")
+        ctx.genExprToAcc(expr.rhs, acc)
+        ctx.asmOut.add("                MOVE    " & acc & ", X0\n")
+        ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", " & acc & "\n")
+        ctx.freeSpill()
+      ctx.asmOut.add("                EOR     X0, " & acc & "\n")
+      return
+
     # Comparison ops evaluated as boolean expression (1.0 for true, 0.0 for false)
     if op in ["<", ">", "<=", ">=", "==", "!="]:
       let lTrue = ctx.nextLabel("_L_cmp_true")
@@ -1264,8 +1328,8 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         if acc != "A":
           ctx.asmOut.add("                MOVE    A, " & acc & "\n")
 
-    of "tanh":
-      # Real DSP56300 polynomial soft saturation: x * (1 - 1/3 * x^2)
+    of "saturate", "cubic", "tanh":
+      # Real DSP56300 polynomial cubic saturation: x * (1 - 1/3 * x^2) = x - x*x*x * 0.3333333
       if expr.args.len >= 1:
         ctx.genExprToAcc(expr.args[0], "A")
         ctx.asmOut.add("                MOVE    A, X0\n")
@@ -1277,6 +1341,100 @@ proc genExprToAcc(ctx: var AsmContext, expr: Expr, acc: string = "A") =
         ctx.asmOut.add("                ADD     Y1, B                ; 1.0 - 1/3 * x^2\n")
         ctx.asmOut.add("                MOVE    B, Y1\n")
         ctx.asmOut.add("                MPY     X0, Y1, " & acc & "            ; x * (1 - 1/3 * x^2)\n")
+
+    of "lfsr":
+      # 24-bit Galois LFSR with standard Clavia polynomial 0x40001B (or custom poly in arg 1)
+      if expr.args.len >= 1:
+        ctx.genExprToAcc(expr.args[0], "A")
+        let polyHex = if expr.args.len >= 2 and expr.args[1].kind == ekNum:
+                        exprToHex(expr.args[1])
+                      else:
+                        "40001B"
+        let lNoCarry = ctx.nextLabel("_lfsr_no_carry")
+        ctx.asmOut.add("                ASL     A                    ; shift left, bit 23 into carry\n")
+        ctx.asmOut.add("                JCC     " & lNoCarry & "         ; skip XOR if carry clear\n")
+        ctx.asmOut.add("                MOVE    #$" & polyHex & ", X0\n")
+        ctx.asmOut.add("                EOR     X0, A                ; Galois feedback polynomial\n")
+        ctx.asmOut.add(lNoCarry & ":\n")
+        if acc != "A":
+          ctx.asmOut.add("                MOVE    A, " & acc & "\n")
+
+    of "poly5":
+      # 5th-order minimax polynomial (Horner form): x * (c1 + x^2 * (c3 + c5 * x^2))
+      # Scaled by 0.5 internally to maintain Q23 range for c1 > 1.0 (e.g. pi/2 = 1.5707963)
+      if expr.args.len >= 1:
+        ctx.genExprToAcc(expr.args[0], "A")
+        ctx.asmOut.add("                MOVE    A, X0                ; x\n")
+        ctx.asmOut.add("                MPY     X0, X0, B            ; x^2\n")
+        ctx.asmOut.add("                MOVE    B, Y0                ; x^2\n")
+        var c5Hex = "0519EE" # 0.0796926 / 2 in Q23
+        var c3Hex = "D6A8CA" # -0.6459641 / 2 in Q23
+        var c1Hex = "6487ED" # 1.5707963 / 2 in Q23
+        if expr.args.len >= 4:
+          if expr.args[1].kind == ekNum: c1Hex = floatToQ23Hex(expr.args[1].numVal * 0.5)
+          if expr.args[2].kind == ekNum: c3Hex = floatToQ23Hex(expr.args[2].numVal * 0.5)
+          if expr.args[3].kind == ekNum: c5Hex = floatToQ23Hex(expr.args[3].numVal * 0.5)
+        ctx.asmOut.add("                MOVE    #$" & c5Hex & ", Y1         ; c5/2\n")
+        ctx.asmOut.add("                MPY     Y0, Y1, B            ; (c5/2) * x^2\n")
+        ctx.asmOut.add("                MOVE    #$" & c3Hex & ", Y1         ; c3/2\n")
+        ctx.asmOut.add("                ADD     Y1, B                ; c3/2 + (c5/2) * x^2\n")
+        ctx.asmOut.add("                MOVE    B, Y1\n")
+        ctx.asmOut.add("                MPY     Y0, Y1, B            ; x^2 * (c3/2 + ...)\n")
+        ctx.asmOut.add("                MOVE    #$" & c1Hex & ", Y1         ; c1/2\n")
+        ctx.asmOut.add("                ADD     Y1, B                ; c1/2 + x^2 * (...)\n")
+        ctx.asmOut.add("                MOVE    B, Y1\n")
+        ctx.asmOut.add("                MPY     X0, Y1, A            ; x * (c1/2 + ...)\n")
+        ctx.asmOut.add("                ASL     A                    ; double back to full scale\n")
+        if acc != "A":
+          ctx.asmOut.add("                MOVE    A, " & acc & "\n")
+
+    of "bitand":
+      if expr.args.len >= 2:
+        ctx.genExprToAcc(expr.args[0], "A")
+        if expr.args[1].kind == ekSym:
+          ctx.loadToX0(expr.args[1])
+        elif expr.args[1].kind == ekNum:
+          ctx.asmOut.add("                MOVE    #" & exprToHex(expr.args[1]) & ", X0\n")
+        else:
+          let spill = ctx.allocSpill()
+          ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
+          ctx.genExprToAcc(expr.args[1], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
+          ctx.freeSpill()
+        ctx.asmOut.add("                AND     X0, " & acc & "\n")
+
+    of "bitor":
+      if expr.args.len >= 2:
+        ctx.genExprToAcc(expr.args[0], "A")
+        if expr.args[1].kind == ekSym:
+          ctx.loadToX0(expr.args[1])
+        elif expr.args[1].kind == ekNum:
+          ctx.asmOut.add("                MOVE    #" & exprToHex(expr.args[1]) & ", X0\n")
+        else:
+          let spill = ctx.allocSpill()
+          ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
+          ctx.genExprToAcc(expr.args[1], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
+          ctx.freeSpill()
+        ctx.asmOut.add("                OR      X0, " & acc & "\n")
+
+    of "bitxor":
+      if expr.args.len >= 2:
+        ctx.genExprToAcc(expr.args[0], "A")
+        if expr.args[1].kind == ekSym:
+          ctx.loadToX0(expr.args[1])
+        elif expr.args[1].kind == ekNum:
+          ctx.asmOut.add("                MOVE    #" & exprToHex(expr.args[1]) & ", X0\n")
+        else:
+          let spill = ctx.allocSpill()
+          ctx.asmOut.add("                MOVE    A, " & ctx.getMemOperand(spill) & "\n")
+          ctx.genExprToAcc(expr.args[1], "A")
+          ctx.asmOut.add("                MOVE    A, X0\n")
+          ctx.asmOut.add("                MOVE    " & ctx.getMemOperand(spill) & ", A\n")
+          ctx.freeSpill()
+        ctx.asmOut.add("                EOR     X0, " & acc & "\n")
 
     of "min":
       if expr.args.len >= 2:
@@ -1757,6 +1915,12 @@ proc emitCExpr(expr: Expr): string =
       return "(" & emitCExpr(expr.lhs) & " && " & emitCExpr(expr.rhs) & ")"
     elif op == "or":
       return "(" & emitCExpr(expr.lhs) & " || " & emitCExpr(expr.rhs) & ")"
+    elif op == "&":
+      return "((float)(((uint32_t)(" & emitCExpr(expr.lhs) & ")) & ((uint32_t)(" & emitCExpr(expr.rhs) & "))))"
+    elif op == "|":
+      return "((float)(((uint32_t)(" & emitCExpr(expr.lhs) & ")) | ((uint32_t)(" & emitCExpr(expr.rhs) & "))))"
+    elif op == "^" or op == "xor":
+      return "((float)(((uint32_t)(" & emitCExpr(expr.lhs) & ")) ^ ((uint32_t)(" & emitCExpr(expr.rhs) & "))))"
     else:
       return "(" & emitCExpr(expr.lhs) & " " & op & " " & emitCExpr(expr.rhs) & ")"
   of ekCall:
@@ -1764,7 +1928,20 @@ proc emitCExpr(expr: Expr): string =
     of "sin": return "sinf(" & emitCExpr(expr.args[0]) & ")"
     of "cos": return "cosf(" & emitCExpr(expr.args[0]) & ")"
     of "tan": return "tanf(" & emitCExpr(expr.args[0]) & ")"
-    of "tanh": return "tanhf(" & emitCExpr(expr.args[0]) & ")"
+    of "tanh", "saturate", "cubic": return "((" & emitCExpr(expr.args[0]) & ") * (1.0f - 0.3333333f * (" & emitCExpr(expr.args[0]) & ") * (" & emitCExpr(expr.args[0]) & ")))"
+    of "lfsr":
+      return "omni_lfsr(" & emitCExpr(expr.args[0]) & ")"
+    of "bitand":
+      return "((float)(((uint32_t)(" & emitCExpr(expr.args[0]) & ")) & ((uint32_t)(" & emitCExpr(expr.args[1]) & "))))"
+    of "bitor":
+      return "((float)(((uint32_t)(" & emitCExpr(expr.args[0]) & ")) | ((uint32_t)(" & emitCExpr(expr.args[1]) & "))))"
+    of "bitxor":
+      return "((float)(((uint32_t)(" & emitCExpr(expr.args[0]) & ")) ^ ((uint32_t)(" & emitCExpr(expr.args[1]) & "))))"
+    of "poly5":
+      if expr.args.len >= 4:
+        return "((" & emitCExpr(expr.args[0]) & ") * (" & emitCExpr(expr.args[1]) & " + (" & emitCExpr(expr.args[0]) & ")*(" & emitCExpr(expr.args[0]) & ") * (" & emitCExpr(expr.args[2]) & " + " & emitCExpr(expr.args[3]) & " * (" & emitCExpr(expr.args[0]) & ")*(" & emitCExpr(expr.args[0]) & "))))"
+      else:
+        return "((" & emitCExpr(expr.args[0]) & ") * (1.5707963f + (" & emitCExpr(expr.args[0]) & ")*(" & emitCExpr(expr.args[0]) & ") * (-0.6459641f + 0.0796926f * (" & emitCExpr(expr.args[0]) & ")*(" & emitCExpr(expr.args[0]) & "))))"
     of "abs": return "fabsf(" & emitCExpr(expr.args[0]) & ")"
     of "trunc": return "truncf(" & emitCExpr(expr.args[0]) & ")"
     of "sqrt": return "sqrtf(" & emitCExpr(expr.args[0]) & ")"
@@ -1854,6 +2031,14 @@ proc emitC*(m: OmniModule): string =
   b.add("#define PI 3.14159265358979323846f\n")
   b.add("#endif\n\n")
   b.add("#define OMNI_MOD(a, b) fmodf((float)(a), (float)(b))\n\n")
+  b.add("static inline float omni_lfsr(float state) {\n")
+  b.add("    uint32_t s = (uint32_t)(state * 8388608.0f);\n")
+  b.add("    if (s == 0) s = (uint32_t)state;\n")
+  b.add("    if (s == 0) s = 0x400000;\n")
+  b.add("    uint32_t c = (s & 0x00FFFFFF) << 1;\n")
+  b.add("    uint32_t next = (c & 0x00FFFFFE) ^ ((c & 0x01000000) ? 0x40001B : 0);\n")
+  b.add("    return (float)(next & 0x007FFFFF) / 8388608.0f;\n")
+  b.add("}\n\n")
 
   # Struct declaration
   b.add("typedef struct {\n")
