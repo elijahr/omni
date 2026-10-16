@@ -72,8 +72,10 @@ OmniSine_process:
                 CMP     X0, A
                 JGE     _L_sin_neg_1
                 MOVE    A, Y0                ; Y0 = u
-                SUB     Y0, X0               ; X0 = 0.5 - u
-                MPY     X0, Y0, A            ; A = u * (0.5 - u)
+                MOVE    #$400000, B          ; B = 0.5
+                SUB     Y0, B                ; B = 0.5 - u
+                MOVE    B, X0                ; X0 = 0.5 - u
+                MPY     X0, Y0, A            ; A = 2 * u * (0.5 - u)
                 ASL     A
                 ASL     A
                 ASL     A
@@ -87,13 +89,20 @@ _L_sin_clamp_3:
 _L_sin_neg_1:
                 SUB     X0, A                ; A = u - 0.5
                 MOVE    A, Y0                ; Y0 = u'
-                MOVE    #$400000, X0
-                SUB     Y0, X0               ; X0 = 0.5 - u'
-                MPY     -X0, Y0, A           ; A = -u' * (0.5 - u')
+                MOVE    #$400000, B          ; B = 0.5
+                SUB     Y0, B                ; B = 0.5 - u'
+                MOVE    B, X0                ; X0 = 0.5 - u'
+                MPY     X0, Y0, A            ; A = 2 * u' * (0.5 - u')
                 ASL     A
                 ASL     A
                 ASL     A
                 ASL     A
+                MOVE    #$7FFFFF, X0
+                CMP     X0, A
+                JLE     _L_sin_neg_clamp_4
+                MOVE    X0, A
+_L_sin_neg_clamp_4:
+                NEG     A
 _L_sin_done_2:
                 MOVE    A, X:out1
                 ; phase = ...
