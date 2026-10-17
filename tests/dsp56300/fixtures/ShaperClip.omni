@@ -1,0 +1,17 @@
+# Nord Modular G2 - ShaperClip (Hard / Soft Clipper)
+# Clean-Room MIT Implementation
+params:
+    mode {0.0, 0.0, 1.0}
+    threshold {0.8, 0.05, 1.0}
+
+sample:
+    x = in1
+    th = threshold
+    if th == 0.0:
+        th = 0.8
+    if x > th:
+        out1 = th
+    elif x < -th:
+        out1 = -th
+    else:
+        out1 = x

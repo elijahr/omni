@@ -1,0 +1,7 @@
+# Nord Modular G2 - RingMod (Four-Quadrant Balanced Ring Modulator)
+# Clean-Room MIT Implementation
+params:
+    depth {1.0, 0.0, 1.0}
+
+sample:
+    out1 = in1 * in2 * depth

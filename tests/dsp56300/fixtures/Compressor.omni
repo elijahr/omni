@@ -1,0 +1,30 @@
+# Nord Modular G2 - Compressor (Dynamic Range Compressor / Limiter)
+# Clean-Room MIT Implementation
+params:
+    threshold {0.5, 0.0, 1.0}
+    slope {0.25, 0.05, 1.0}
+    attack {0.05, 0.001, 1.0}
+    release {0.1, 0.01, 1.0}
+    gain {0.8, 0.0, 1.0}
+
+init:
+    env = 0.0
+
+sample:
+    inSig = in1
+    side = in2
+    if side == 0.0:
+        side = abs(inSig)
+    else:
+        side = abs(side)
+    if side > env:
+        env = env + attack * (side - env)
+    else:
+        env = env + release * (side - env)
+    compGain = 1.0
+    if env > threshold:
+        diff = env - threshold
+        compGain = 1.0 - diff * slope
+        if compGain < 0.1:
+            compGain = 0.1
+    out1 = inSig * compGain * gain

@@ -1,0 +1,34 @@
+# Nord Modular G2 - LogicDelay (Logic Pulse Delay & Generator)
+# Clean-Room MIT Implementation
+params:
+    delayLen {0.1, 0.01, 1.0}
+    pulseLen {0.05, 0.01, 1.0}
+
+init:
+    dCount = 0.0
+    pCount = 0.0
+    prevIn = 0.0
+
+sample:
+    dLen = delayLen
+    if dLen == 0.0:
+        dLen = 0.1
+    pLen = pulseLen
+    if pLen == 0.0:
+        pLen = 0.05
+
+    if in1 > 0.5 and prevIn <= 0.5:
+        dCount = dLen
+    prevIn = in1
+    outPulse = 0.0
+    if dCount > 0.0:
+        dCount = dCount - 0.01
+        if dCount <= 0.0:
+            dCount = 0.0
+            pCount = pLen
+    if pCount > 0.0:
+        pCount = pCount - 0.01
+        if pCount <= 0.0:
+            pCount = 0.0
+        outPulse = 1.0
+    out1 = outPulse

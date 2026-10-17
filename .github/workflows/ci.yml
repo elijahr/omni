@@ -42,6 +42,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout dsp56300-nim dependency
+        run: |
+          git clone --depth 1 https://github.com/elijahr/dsp56300-nim.git ../dsp56300-nim
+
       - name: Setup Nim via vfox-nim
         uses: elijahr/vfox-nim@main
         with:
@@ -126,6 +130,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout dsp56300-nim dependency
+        run: |
+          git clone --depth 1 https://github.com/elijahr/dsp56300-nim.git ../dsp56300-nim
+
       - name: Setup Nim stable (2.2.12) via vfox-nim
         uses: elijahr/vfox-nim@main
         with:
@@ -162,16 +170,16 @@ jobs:
             fi
           done
 
-      - name: Verify parser and macros under Nimony
+      - name: Verify Motorola DSP56300 and C pipeline under Nimony
         run: |
           set -o pipefail
           echo "::group::nimony aufbruch verification"
           NIMONY_BIN="$(command -v nimony 2>/dev/null || find "$HOME/.version-fox/cache/nim" "$HOME/.vfox/cache/nim" -type f -name nimony 2>/dev/null | head -n 1)"
           if [ -n "$NIMONY_BIN" ] && [ -x "$NIMONY_BIN" ]; then
             echo "Using nimony binary at: $NIMONY_BIN"
-            "$NIMONY_BIN" c -r tests/parser/test_parser.nim || echo "::warning::nimony test run exited non-zero (informational)"
+            "$NIMONY_BIN" c -r tests/dsp56300/test_pipeline.nim || echo "::warning::nimony test run exited non-zero (informational)"
           else
             echo "::warning::nimony binary not found or not executable (informational fallback)"
-            nim c --mm:arc --threads:on -r tests/parser/test_parser.nim || true
+            nim c --mm:arc --threads:on -r tests/dsp56300/test_pipeline.nim || true
           fi
           echo "::endgroup::"

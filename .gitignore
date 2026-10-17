@@ -6,7 +6,5 @@
 *.exe
 
 omni
-omnidsp
 omni_lang/config.nims
 omni_lang/.gitignore
-*.paths

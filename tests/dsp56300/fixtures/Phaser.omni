@@ -1,0 +1,23 @@
+# Nord Modular G2 - Phaser
+# Clean-Room MIT Implementation
+params:
+    rate {0.05, 0.001, 0.5}
+    depth {0.5, 0.0, 1.0}
+    feedback {0.3, 0.0, 0.95}
+
+init:
+    lfoPhase = 0.0
+    ap1 = 0.0
+    ap2 = 0.0
+    ap3 = 0.0
+    ap4 = 0.0
+
+sample:
+    lfoPhase = (lfoPhase + rate * 0.01) % 1.0
+    mod = 0.5 + 0.3 * sin(lfoPhase)
+    fb = in1 + ap4 * feedback
+    ap1 = fb - mod * ap1
+    ap2 = ap1 - mod * ap2
+    ap3 = ap2 - mod * ap3
+    ap4 = ap3 - mod * ap4
+    out1 = (in1 + ap4 * depth) * 0.5

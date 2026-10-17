@@ -1,0 +1,16 @@
+# Nord Modular G2 - OscNoise (White / Pink Noise Generator)
+# Clean-Room MIT Implementation
+params:
+    level {1.0, 0.0, 1.0}
+
+init:
+    seed = 0.37123
+
+sample:
+    if seed < 0.5:
+        seed = (seed + seed) * 0.998 + 0.001
+    else:
+        seed = ((1.0 - seed) + (1.0 - seed)) * 0.998 + 0.001
+    diff = seed - 0.5
+    raw = diff + diff
+    out1 = raw * level

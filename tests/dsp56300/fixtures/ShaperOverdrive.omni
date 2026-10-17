@@ -1,0 +1,8 @@
+# Nord Modular G2 - ShaperOverdrive (Non-linear Soft Saturator)
+# Clean-Room MIT Implementation
+params:
+    drive {0.5, 0.0, 1.0}
+
+sample:
+    x = in1 + in1 * drive
+    out1 = tanh(x)
