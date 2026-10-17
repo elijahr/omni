@@ -35,7 +35,7 @@ skipDirs = @["omni_lang"]
 installDirs = @["examples"]
 
 #Compiler executable
-bin = @["omni"]
+bin = @["omni", "omnicollider", "omnimax"]
 
 #Make sure omni-lang is getting installed first
 before install:

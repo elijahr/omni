@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import cligen, terminal, os, strutils, osproc
+import omni_ast, omni_targets
 
 #Package version is passed as argument when building. It will be constant and set correctly
 const 
@@ -111,7 +112,7 @@ proc parseAndPrintCompilationString(msg : string) : bool =
     return false
 
 #Actual compiler
-proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : string = "", outDir : string = "", lib : string = "shared", architecture : string = "native",  compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[],exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
+proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : string = "", outDir : string = "", target : string = "", lib : string = "shared", architecture : string = "native",  compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[],exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
 
     var 
         omniFile     = splitFile(fileFullPath)
@@ -139,6 +140,82 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
     #Check if dir exists
     if not outDirFullPath.dirExists():
         printError("outDir: " & $outDirFullPath & " does not exist.")
+        return 1
+
+    # Check if target is nim, puredata, supercollider, max, or native (default)
+    var effectiveTarget = target.toLowerAscii()
+    if effectiveTarget == "pd": effectiveTarget = "puredata"
+    elif effectiveTarget == "sc": effectiveTarget = "supercollider"
+    elif effectiveTarget == "msp": effectiveTarget = "max"
+    elif effectiveTarget == "default": effectiveTarget = "native"
+
+    if effectiveTarget == "nim":
+        let m = parseOmniFile(fileFullPath)
+        let nimCode = emitNim(m)
+        var nimOutName = if outName != "": outName else: omniFileName & ".nim"
+        if not nimOutName.endsWith(".nim"):
+            nimOutName.add(".nim")
+        let targetFilePath = outDirFullPath / nimOutName
+        writeFile(targetFilePath, nimCode)
+        printDone("'" & nimOutName & "' has been generated to folder \"" & $outDirFullPath & "\".")
+        return 0
+
+    elif effectiveTarget == "puredata":
+        let m = parseOmniFile(fileFullPath)
+        let pdCode = emitPd(m)
+        var pdOutName = if outName != "": outName else: omniFileName & "~.pd.c"
+        if not pdOutName.endsWith(".c"):
+            pdOutName.add(".c")
+        let targetFilePath = outDirFullPath / pdOutName
+        writeFile(targetFilePath, pdCode)
+        printDone("Pure Data external source '" & pdOutName & "' has been generated to folder \"" & $outDirFullPath & "\".")
+
+        # Compile to loadable external binary (.pd_darwin, .pd_linux, .m_amd64)
+        let pdExt = when defined(MacOSX) or defined(MacOS): ".pd_darwin"
+                    elif defined(Linux): ".pd_linux"
+                    elif defined(Windows): ".m_amd64"
+                    else: ".pd_ext"
+        let binPath = outDirFullPath / (omniFileName & "~" & pdExt)
+        var buildCmd = ""
+        when defined(MacOSX) or defined(MacOS):
+            buildCmd = "clang -bundle -undefined dynamic_lookup -O3 \"" & targetFilePath & "\" -o \"" & binPath & "\""
+        elif defined(Linux):
+            buildCmd = "gcc -shared -fPIC -O3 \"" & targetFilePath & "\" -o \"" & binPath & "\""
+        elif defined(Windows):
+            buildCmd = "gcc -shared -O3 \"" & targetFilePath & "\" -o \"" & binPath & "\""
+
+        if buildCmd != "" and execCmd(buildCmd & " 2>/dev/null") == 0:
+            printDone("Pure Data loadable binary '" & (omniFileName & "~" & pdExt) & "' compiled to folder \"" & $outDirFullPath & "\".")
+
+        return 0
+
+    elif effectiveTarget == "supercollider":
+        let m = parseOmniFile(fileFullPath)
+        let scClass = emitSuperColliderClass(m)
+        let scCpp = emitSuperColliderCpp(m)
+        let scClassPath = outDirFullPath / (omniFileName & ".sc")
+        let scCppPath = outDirFullPath / (omniFileName & ".cpp")
+        writeFile(scClassPath, scClass)
+        writeFile(scCppPath, scCpp)
+        printDone("SuperCollider UGen source files ('" & omniFileName & ".sc', '" & omniFileName & ".cpp') have been generated to folder \"" & $outDirFullPath & "\".")
+        return 0
+
+    elif effectiveTarget == "max":
+        let m = parseOmniFile(fileFullPath)
+        let maxCode = emitMax(m)
+        var maxOutName = if outName != "": outName else: omniFileName & "~.max.c"
+        if not maxOutName.endsWith(".c"):
+            maxOutName.add(".c")
+        let targetFilePath = outDirFullPath / maxOutName
+        writeFile(targetFilePath, maxCode)
+        printDone("Max/MSP external source '" & maxOutName & "' has been generated to folder \"" & $outDirFullPath & "\".")
+        return 0
+
+    elif effectiveTarget == "native" or effectiveTarget == "":
+        discard # proceed to standard native compilation below
+
+    else:
+        printError("Target '" & target & "' is invalid. Valid targets are 'native', 'nim', 'puredata' (pd), 'supercollider' (sc), and 'max'.")
         return 1
 
     #Check performBits argument
@@ -323,11 +400,23 @@ proc omni_single_file(is_multi : bool = false, fileFullPath : string, outName : 
     return 0
 
 #Unpack files arg and pass it to compiler
-proc omni(files : seq[string], outName : string = "", outDir : string = "", lib : string = "shared", architecture : string = "native", compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[], exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
+proc omni(files : seq[string], outName : string = "", output : string = "", outDir : string = "", target : string = "", lib : string = "shared", architecture : string = "native", compiler : string = default_compiler, performBits : string = "32/64", wrapper : string = "", define : seq[string] = @[], importModule : seq[string] = @[], passNim : seq[string] = @[], exportHeader : bool = true, exportIO : bool = false, silent : bool = false) : int =
     #no files provided, print --version
     if files.len == 0:
         echo version_flag
         return 0
+
+    var effOutName = if output != "": output else: outName
+    var effOutDir = outDir
+    if effOutName != "":
+        if effOutName.dirExists() or effOutName.endsWith("/") or effOutName.endsWith("\\"):
+            effOutDir = effOutName
+            effOutName = ""
+        else:
+            let (d, n, ext) = splitFile(effOutName)
+            if d != "":
+                effOutDir = d
+                effOutName = n & ext
 
     for omniFile in files:
         #Get full extended path
@@ -337,9 +426,9 @@ proc omni(files : seq[string], outName : string = "", outDir : string = "", lib 
         if omniFileFullPath.fileExists():
             #if just one file in CLI, also pass the outName flag
             if files.len == 1:
-                return omni_single_file(false, omniFileFullPath, outName, outDir, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent)
+                return omni_single_file(false, omniFileFullPath, effOutName, effOutDir, target, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent)
             else:
-                if omni_single_file(true, omniFileFullPath, "", outDir, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
+                if omni_single_file(true, omniFileFullPath, "", effOutDir, target, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
                     return 1
 
         #If it's a dir, compile all .omni/.oi files in it
@@ -351,7 +440,7 @@ proc omni(files : seq[string], outName : string = "", outDir : string = "", lib 
                         dirFileExt = dirFileFullPath.splitFile().ext
                     
                     if dirFileExt == ".omni" or dirFileExt == ".oi":
-                        if omni_single_file(true, dirFileFullPath, "", outDir, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
+                        if omni_single_file(true, dirFileFullPath, "", effOutDir, target, lib, architecture, compiler, performBits, wrapper, define, importModule, passNim, exportHeader, exportIO, silent) > 0:
                             return 1
 
         else:
@@ -385,6 +474,8 @@ dispatch(
     short = {
         "version" : 'v',
         "outName" : 'n',
+        "output" : 'o',
+        "target" : 't',
         "performBits" : 'b',
         "importModule" : 'm',
         "passNim" : 'p',
@@ -394,8 +485,10 @@ dispatch(
     help = {
         "help" : "CLIGEN-NOHELP",
         "version" : "CLIGEN-NOHELP",
-        "outName" : "Name for the output library. Defaults to the name of the input file with 'lib' prepended to it (e.g. 'OmniSaw.omni' -> 'libOmniSaw" & $shared_lib_extension & "'). This argument does not work for directories or multiple files.",
+        "outName" : "Name for the output library or file. Defaults to the name of the input file.",
+        "output" : "Output file path or name (alias for -n / --outName).",
         "outDir" : "Output folder. Defaults to the one of the Omni file(s) to compile.",
+        "target" : "Target backend: 'native' (shared/static lib), 'nim' (pure Nim), 'puredata'/'pd', 'supercollider'/'sc', or 'max'.",
         "lib" : "Build a 'shared' or 'static' library.",
         "architecture" : "Build architecture.",
         "compiler" : "Select a different C backend compiler to use. Omni supports all of Nim's C compilers.",
